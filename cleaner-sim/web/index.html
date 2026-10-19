@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2D 户型全覆盖清扫仿真 · 覆盖率看板</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo"></span>
+    <div>
+      <h1>2D 户型全覆盖清扫仿真</h1>
+      <p>HouseExpo 户型解析与栅格化 · BCD 全覆盖路径规划 · 运动仿真 · 覆盖率与效率看板</p>
+    </div>
+  </div>
+  <div class="topbar-meta">
+    <span class="chip" id="metaData">数据集载入中…</span>
+    <span class="chip chip-ok" id="metaStatus">就绪</span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============================ 左栏：上传 + 户型选择 + 参数 ============================ -->
+  <aside class="panel panel-left">
+    <section class="block">
+      <h2 class="block-title"><b>0</b> 上传户型图<span class="hint">在线仿真</span></h2>
+      <div class="drop" id="drop" tabindex="0" role="button">
+        <input type="file" id="file" accept=".json,application/json,image/*" hidden>
+        <b>点击选择</b> 或把文件拖到这里
+        <small>HouseExpo <code>.json</code> ／ 户型图片 <code>PNG · JPG · WebP</code></small>
+      </div>
+      <p class="tip" id="uploadHint">图片在浏览器内解码为灰度，再由 Python 栅格化管线解析；可实时调阈值并预览。</p>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title"><b>1</b> 选择户型<span class="hint" id="planCount"></span></h2>
+      <div class="filters">
+        <input id="search" type="search" placeholder="按 ID / 房间类型搜索…" autocomplete="off">
+        <select id="tier">
+          <option value="">全部难度</option>
+          <option value="simple">简单（≤4 房）</option>
+          <option value="medium">中等（5–9 房）</option>
+          <option value="complex">复杂（≥10 房）</option>
+          <option value="custom">仅上传</option>
+        </select>
+      </div>
+      <div class="picker" id="picker"></div>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title"><b>2</b> 仿真参数</h2>
+      <div class="field">
+        <label>栅格分辨率 <output id="cellOut">10 cm / 格</output></label>
+        <input id="cellCm" type="range" min="4" max="25" step="1" value="10">
+        <p class="tip">栅格越小越精细，规划耗时按面积平方增长。</p>
+      </div>
+      <div class="field">
+        <label>机器人直径 <output id="robotOut">34 cm</output></label>
+        <input id="robotCm" type="range" min="12" max="70" step="2" value="34">
+        <p class="tip">碰撞与清扫都按 <em>2r+1</em> 格方形足迹建模。</p>
+      </div>
+      <div class="field">
+        <label>扫描间距</label>
+        <select id="spacingMode" class="wide">
+          <option value="exact" selected>精确贴合 2r+1（步数最少）</option>
+          <option value="overlap">重叠一遍 2r（更保守）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>目标覆盖率 <output id="covOut">99.5%</output></label>
+        <input id="targetCov" type="range" min="80" max="100" step="0.5" value="99.5">
+      </div>
+      <div class="field">
+        <label>清扫速度 <output id="speedOut">0.25 m/s</output></label>
+        <input id="speedMps" type="range" min="5" max="120" step="5" value="25">
+      </div>
+      <button id="runBtn" class="btn btn-primary" disabled>开始仿真</button>
+      <p class="tip" id="runHint">选择左侧户型后仿真。</p>
+    </section>
+  </aside>
+
+  <!-- ============================ 中栏：画布与回放 ============================ -->
+  <section class="stage">
+    <div class="stage-head">
+      <div>
+        <h2 id="stageTitle">未选择户型</h2>
+        <p id="stageSub">在左侧点选一张户型，或上传自己的户型图，然后点击「开始仿真」。</p>
+      </div>
+      <div class="stage-toggles">
+        <label class="switch"><input id="showHeat" type="checkbox"><span>清扫热度</span></label>
+        <label class="switch"><input id="showPath" type="checkbox" checked><span>轨迹</span></label>
+        <label class="switch"><input id="showDead" type="checkbox" checked><span>不可达区域</span></label>
+        <label class="switch"><input id="showPhase" type="checkbox" checked><span>分区着色</span></label>
+      </div>
+    </div>
+
+    <div class="canvas-wrap">
+      <canvas id="view" width="960" height="640"></canvas>
+      <div class="canvas-legend">
+        <span><i class="sw sw-wall"></i>墙体</span>
+        <span><i class="sw sw-clean"></i>已清扫</span>
+        <span><i class="sw sw-floor"></i>待清扫</span>
+        <span><i class="sw sw-sep"></i>不可达（需分区）</span>
+        <span><i class="sw sw-tight"></i>死角</span>
+      </div>
+      <div class="canvas-empty" id="canvasEmpty">等待仿真数据…</div>
+    </div>
+
+    <div class="controls">
+      <button id="playBtn" class="btn btn-icon" disabled>▶</button>
+      <button id="resetBtn" class="btn btn-icon" disabled>⟲</button>
+      <input id="scrub" type="range" min="0" max="100" value="0" step="1" disabled>
+      <span class="step-readout"><b id="stepNow">0</b> / <span id="stepTotal">0</span> 步</span>
+      <label class="speed">
+        倍速
+        <select id="rate">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <!-- ============================ 右栏：覆盖率与指标看板 ============================ -->
+  <aside class="panel panel-right">
+    <section class="block">
+      <h2 class="block-title"><b>3</b> 覆盖率</h2>
+      <div class="gauge">
+        <svg viewBox="0 0 120 120" class="donut">
+          <circle class="donut-bg" cx="60" cy="60" r="52"></circle>
+          <circle class="donut-fg" id="donutWalk" cx="60" cy="60" r="52"></circle>
+          <circle class="donut-fg2" id="donutReach" cx="60" cy="60" r="40"></circle>
+        </svg>
+        <div class="gauge-read">
+          <b id="covBig">—</b>
+          <span>全屋覆盖率</span>
+          <em id="covSub">可达区域 —</em>
+        </div>
+      </div>
+      <canvas id="chart" height="120"></canvas>
+      <p class="chart-cap">覆盖率随时间变化（横轴：步数）</p>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title"><b>4</b> 效率指标</h2>
+      <div class="metrics" id="metrics"></div>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title"><b>5</b> 区域与死区</h2>
+      <div id="regions" class="list"></div>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title"><b>6</b> 规划阶段</h2>
+      <div id="phases" class="list"></div>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title"><b>7</b> 栅格化管线</h2>
+      <div id="stages" class="list"></div>
+    </section>
+  </aside>
+
+</main>
+
+<!-- ============================ 图片解析调参弹层 ============================ -->
+<div class="modal" id="imgModal" hidden>
+  <div class="modal-mask" id="imgMask"></div>
+  <div class="modal-box">
+    <h3>解析户型图 <em id="imgName"></em></h3>
+    <p class="tip">左侧是原图，右侧是 Python 管线解析出的墙体（黑）与可通行区域（白）。调整参数直到墙体闭合、房间干净。</p>
+    <div class="img-grid">
+      <figure><img id="srcPreview" alt="原图"><figcaption>原图</figcaption></figure>
+      <figure><img id="parsePreview" alt="解析结果"><figcaption>解析结果</figcaption></figure>
+    </div>
+    <div class="img-fields">
+      <div class="field">
+        <label>二值化阈值 <output id="thrOut">自动</output></label>
+        <input id="thr" type="range" min="0" max="255" step="1" value="128">
+        <label class="switch thin"><input id="thrAuto" type="checkbox" checked><span>自动（Otsu）</span></label>
+      </div>
+      <div class="field">
+        <label>封口半径 <output id="sealOut">2 px</output></label>
+        <input id="seal" type="range" min="0" max="8" step="1" value="2">
+        <p class="tip">墙线有断口时调大，可避免外部区域被误判为室内。</p>
+      </div>
+      <div class="field">
+        <label>户型实际宽度 <output id="realWOut">10.0 m</output></label>
+        <input id="realW" type="range" min="2" max="60" step="0.5" value="10">
+        <p class="tip">图片没有比例尺，需要你给出户型的真实宽度来换算米。</p>
+      </div>
+      <div class="field">
+        <label class="switch thin"><input id="invert" type="checkbox"><span>墙体为浅色（深底白线）</span></label>
+      </div>
+    </div>
+    <div class="img-stats" id="imgStats"></div>
+    <div class="modal-act">
+      <button class="btn" id="imgCancel">取消</button>
+      <button class="btn" id="imgReparse">重新解析</button>
+      <button class="btn btn-primary" id="imgSave">加入列表并仿真</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
