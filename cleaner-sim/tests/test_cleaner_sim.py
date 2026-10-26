@@ -405,6 +405,82 @@ class TestImagePipeline(unittest.TestCase):
             gray, w, h, ImageParseParams(real_height_m=size_y, scale_axis="y"))
         self.assertAlmostEqual(fine.size_y_m, size_y, delta=0.3)
 
+    # ------------------------------------------------ 反色语义 / 自动阈值回归
+    @staticmethod
+    def _frame_gray(w, h, bg, wall, t=4, inset=10):
+        gray = bytearray([bg]) * (w * h)
+        for y in range(h):
+            for x in range(w):
+                on = ((inset <= x < inset + t or w - inset - t <= x < w - inset)
+                      and inset <= y < h - inset) \
+                    or ((inset <= y < inset + t or h - inset - t <= y < h - inset)
+                        and inset <= x < w - inset)
+                if on:
+                    gray[y * w + x] = wall
+        return bytes(gray)
+
+    def test_invert_parses_light_wall_image(self):
+        """深底浅线的"反色风格"图：勾选「墙体为浅色」应能正确解析（语义同步）。"""
+        gray = self._frame_gray(80, 80, bg=40, wall=235)
+        fine, diag = parse_floorplan_image(gray, 80, 80,
+                                           ImageParseParams(invert=True, real_width_m=6.0))
+        self.assertTrue(0.15 <= diag["free_fraction"] <= 0.7, diag["free_fraction"])
+        self.assertLessEqual(diag["wall_fraction"], 0.5)
+        self.assertFalse(diag["threshold_auto_adjusted"])
+        occ, view = build_world(fine, cell_cm=10.0, robot_cm=34.0)
+        self.assertGreater(G.count(view.cleanable), 100)
+
+    def test_invert_checked_on_normal_floorplan_warns(self):
+        """白底深线图误勾选「墙体为浅色」：两条路径都必须给出方向明确的提示。"""
+        gray = self._frame_gray(80, 80, bg=255, wall=60)
+        # 路径 1（封口半径 >0）：解析直接失败，错误信息必须指向"取消勾选"
+        with self.assertRaises(ValueError) as ctx:
+            parse_floorplan_image(gray, 80, 80,
+                                  ImageParseParams(invert=True, real_width_m=6.0))
+        self.assertIn("取消勾选", str(ctx.exception))
+        # 路径 2（封口半径=0，用户当时的设置）：解析完成但必须给出"取消勾选"告警
+        _fine, diag = parse_floorplan_image(
+            gray, 80, 80, ImageParseParams(invert=True, seal_px=0, real_width_m=6.0))
+        self.assertGreater(diag["wall_fraction"], 0.5)
+        self.assertTrue(any("取消勾选" in w for w in diag["warnings"]), diag["warnings"])
+        self.assertFalse(diag["threshold_auto_adjusted"])
+
+    def test_auto_threshold_retries_when_outline_leaks(self):
+        """浅色窗线高于 Otsu 时外轮廓不闭合：自动阈值应重试到轮廓封住。"""
+        w, h = 120, 90
+        gray = bytearray([255]) * (w * h)
+        deep, light = 60, 225
+        for x in range(20, 100):
+            for y in (20, 21, 22, 66, 67, 68):
+                gray[y * w + x] = deep
+        for y in range(20, 69):
+            for x in (20, 21, 22):
+                gray[y * w + x] = deep
+        for y in range(20, 45):
+            for x in (97, 98, 99):
+                gray[y * w + x] = deep
+        for y in range(45, 69):                    # 右墙下半段画成浅灰"窗线"
+            for x in (97, 98, 99):
+                gray[y * w + x] = light
+        fine, diag = parse_floorplan_image(bytes(gray), w, h,
+                                           ImageParseParams(real_width_m=8.0))
+        self.assertTrue(diag["threshold_auto_adjusted"], diag)
+        self.assertLess(diag["threshold_auto_base"], diag["threshold"],
+                        "优化后的阈值应高于原始 Otsu")
+        self.assertTrue(0.15 <= diag["free_fraction"] <= 0.7, diag["free_fraction"])
+        self.assertTrue(any("自动阈值" in w_ for w_ in diag["warnings"]), diag["warnings"])
+        occ, view = build_world(fine, cell_cm=10.0, robot_cm=34.0)
+        self.assertGreater(G.count(view.cleanable), 0)
+
+    def test_clean_image_keeps_otsu_without_adjustment(self):
+        """干净图不应触发自动优化（保证正常路径零开销、结果不变）。"""
+        from tools.test_image_pipeline import render_floorplan_image
+        plan = self.lib.get(self.lib.ids()[0])
+        gray, w, h, _ = render_floorplan_image(plan)
+        _fine, diag = parse_floorplan_image(gray, w, h, ImageParseParams(real_width_m=6.0))
+        self.assertFalse(diag["threshold_auto_adjusted"])
+        self.assertFalse(any("自动阈值" in w_ for w_ in diag["warnings"]))
+
 
 class TestUploadStore(unittest.TestCase):
     def setUp(self):
@@ -466,6 +542,291 @@ class TestUploadStore(unittest.TestCase):
         up = self.store.add_houseexpo("mine.json", src.path.read_text(encoding="utf-8"))
         reopened = UploadStore(self.dir)
         self.assertIn(up.id, reopened.items)
+
+
+# ------------------------------------------------- 2026-10 加固：回归防护
+class TestInputGuards(unittest.TestCase):
+    """P0/P1 guards: pixel limits, params validation, mask length checks."""
+
+    def test_run_params_validation(self):
+        from cleaner_sim.pipeline import RunParams
+        RunParams()                                   # defaults must stay valid
+        with self.assertRaises(ValueError):
+            RunParams(cell_cm=0)
+        with self.assertRaises(ValueError):
+            RunParams(robot_cm=-1)
+        with self.assertRaises(ValueError):
+            RunParams(supersample=0)
+
+    def test_mask_length_guards(self):
+        occ = build_occupancy(rect_plan(4.0, 3.0), cell_cm=10.0)
+        view = build_robot_view(occ, robot_cm=20.0)
+        with self.assertRaises(ValueError):
+            analyse_coverage(occ, view, bytearray(3))
+        with self.assertRaises(ValueError):
+            G.intersection(bytearray(4), bytearray(5))
+        with self.assertRaises(ValueError):
+            G.union(bytearray(4), bytearray(5))
+
+    def test_pixel_limits(self):
+        import base64
+        from cleaner_sim.server import MAX_PREVIEW_PIXELS, _gray_from_body
+        from cleaner_sim.uploads import MAX_GRAY_PIXELS
+        self.assertLess(MAX_PREVIEW_PIXELS, MAX_GRAY_PIXELS)
+
+        # 尺寸检查发生在解码之前：不带 gray_b64 也会先被像素上限拦下
+        with self.assertRaises(ValueError) as ctx:
+            _gray_from_body({"width": 1700, "height": 1700})
+        self.assertIn("过大", str(ctx.exception))
+
+        # 预览上限更小：1500×1500 被预览拒绝，但上传路径只会在灰度数据处报错
+        body = {"width": 1500, "height": 1500, "gray_b64": "AAAA"}
+        with self.assertRaises(ValueError) as ctx2:
+            _gray_from_body(body, MAX_PREVIEW_PIXELS)
+        self.assertIn("过大", str(ctx2.exception))
+        with self.assertRaises(ValueError) as ctx3:
+            _gray_from_body(body)
+        self.assertIn("灰度", str(ctx3.exception))
+
+        gray = base64.b64encode(bytes(64)).decode("ascii")
+        got, w, h = _gray_from_body({"width": 8, "height": 8, "gray_b64": gray})
+        self.assertEqual((len(got), w, h), (64, 8, 8))
+
+
+class TestPhaseCompaction(unittest.TestCase):
+    def test_small_list_untouched(self):
+        from cleaner_sim.pipeline import _compact_phases
+        phases = [{"kind": "sweep", "start_step": 0, "end_step": 9}]
+        self.assertIs(_compact_phases(phases), phases)
+
+    def test_compaction_keeps_coverage_and_regions(self):
+        from cleaner_sim.pipeline import _compact_phases
+        # 区间更长的 region 不应被更短的 retreat 挤掉（旧实现按不存在的键排序必丢 region）
+        sweep = {"kind": "sweep", "start_step": 0, "end_step": 5000}
+        regions = [{"kind": "region", "start_step": 10 + i * 100,
+                    "end_step": 10 + i * 100 + 80} for i in range(35)]
+        retreats = [{"kind": "retreat", "start_step": 3600 + i * 100,
+                     "end_step": 3600 + i * 100 + 60, "cluster_cells": 5 + i}
+                    for i in range(4)]
+        out = _compact_phases([sweep] + regions + retreats)
+        self.assertLessEqual(len(out), 30)
+        self.assertIn("region", [p["kind"] for p in out])
+        self.assertTrue(all(p["end_step"] >= p["start_step"] for p in out))
+        total = max(p["end_step"] for p in out) + 1
+        covered = [False] * total
+        for p in out:
+            for s in range(max(0, p["start_step"]), min(p["end_step"], total - 1) + 1):
+                covered[s] = True
+        self.assertTrue(all(covered), "compaction must not leave uncovered steps")
+
+    def test_compaction_no_holes_with_many_retreats(self):
+        # 复刻真实数据形态：38 个 retreat + 7 个 region（样例 5f7421aa 的比例）
+        from cleaner_sim.pipeline import _compact_phases
+        sweep = {"kind": "sweep", "start_step": 0, "end_step": 4000}
+        regions = [{"kind": "region", "start_step": 10 + i * 90,
+                    "end_step": 10 + i * 90 + 60} for i in range(7)]
+        retreats = [{"kind": "retreat", "start_step": 1000 + i * 80,
+                     "end_step": 1000 + i * 80 + 50, "cluster_cells": 3 + i}
+                    for i in range(38)]
+        out = _compact_phases([sweep] + regions + retreats)
+        self.assertLessEqual(len(out), 30)
+        total = max(p["end_step"] for p in out) + 1
+        covered = [False] * total
+        for p in out:
+            for s in range(max(0, p["start_step"]), min(p["end_step"], total - 1) + 1):
+                covered[s] = True
+        self.assertTrue(all(covered), "dropped retreats must not leave holes")
+
+
+class TestCacheAndConcurrency(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        import uuid
+        self._shutil = shutil
+        base = Path(__file__).resolve().parent / "_tmp"
+        base.mkdir(exist_ok=True)
+        self.dir = base / f"svc-{uuid.uuid4().hex[:8]}"
+
+    def tearDown(self):
+        self._shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_cache_returns_isolated_copies(self):
+        from cleaner_sim.pipeline import RunParams, SimulationService
+        try:
+            lib = FloorplanLibrary()
+        except FileNotFoundError:
+            self.skipTest("HouseExpo dataset not available")
+        svc = SimulationService(upload_dir=self.dir)
+        fid = lib.ids()[0]
+        r1 = svc.run(fid, RunParams())
+        r2 = svc.run(fid, RunParams())
+        self.assertIsNot(r1, r2)
+        self.assertIsNot(r1["pipeline"]["planner_stats"],
+                         r2["pipeline"]["planner_stats"])
+        r1["pipeline"]["planner_stats"]["__demo__"] = 1
+        r3 = svc.run(fid, RunParams())
+        self.assertNotIn("__demo__", r3["pipeline"]["planner_stats"],
+                         "mutating a returned payload must not corrupt the cache")
+
+    def test_parallel_uploads_keep_index_consistent(self):
+        import json as _json
+        import threading
+        try:
+            lib = FloorplanLibrary()
+        except FileNotFoundError:
+            self.skipTest("HouseExpo dataset not available")
+        src_text = lib.get(lib.ids()[0]).path.read_text(encoding="utf-8")
+        store = UploadStore(self.dir)
+        errors = []
+
+        def worker(k):
+            try:
+                for i in range(6):
+                    up = store.add_houseexpo(f"w{k}-{i}.json", src_text)
+                    store.list_meta()                     # 并发读
+                    if i % 2 == 0:
+                        store.delete(up.id)               # 并发写/删
+            except Exception as exc:                      # noqa: BLE001
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        raw = _json.loads((self.dir / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual({u["id"] for u in raw["uploads"]}, set(store.items),
+                         "index.json must match the in-memory registry")
+
+
+class TestHttpBodyHandling(unittest.TestCase):
+    """P0-A3 regression: bad request bodies must not poison keep-alive pipes."""
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        import uuid
+        from http.server import ThreadingHTTPServer
+
+        from cleaner_sim.pipeline import SimulationService
+        from cleaner_sim.server import Handler
+        try:
+            FloorplanLibrary()
+        except FileNotFoundError:
+            raise unittest.SkipTest("HouseExpo dataset not available")
+        base = Path(__file__).resolve().parent / "_tmp"
+        base.mkdir(exist_ok=True)
+        cls._dir = base / f"http-{uuid.uuid4().hex[:8]}"
+        cls._service = SimulationService(upload_dir=cls._dir)
+        cls._old_service = Handler.service
+        Handler.service = cls._service
+        cls._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls._port = cls._httpd.server_address[1]
+        cls._thread = threading.Thread(target=cls._httpd.serve_forever, daemon=True)
+        cls._thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+
+        from cleaner_sim.server import Handler
+        cls._httpd.shutdown()
+        cls._httpd.server_close()
+        Handler.service = cls._old_service
+        shutil.rmtree(cls._dir, ignore_errors=True)
+
+    def _connect(self):
+        import socket
+        return socket.create_connection(("127.0.0.1", self._port), timeout=5)
+
+    def _read_until(self, sock, needle: bytes, limit: int = 65536) -> bytes:
+        buf = b""
+        while needle not in buf and len(buf) < limit:
+            try:
+                chunk = sock.recv(4096)
+            except Exception:                             # noqa: BLE001
+                break
+            if not chunk:
+                break
+            buf += chunk
+        return buf
+
+    def test_oversized_length_closes_connection(self):
+        s = self._connect()
+        try:
+            s.sendall(b"POST /api/delete HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Type: application/json\r\n"
+                      b"Content-Length: 20000000\r\n\r\n" + b'{"id":"x"}')
+            head = self._read_until(s, b"\r\n\r\n", limit=8192)
+            self.assertIn(b" 413 ", head)
+            self.assertIn(b"Connection: close", head)
+            rest = b""                                    # 残余内容里不允许再出现第二个响应
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except Exception:                         # noqa: BLE001
+                    break
+                if not chunk:
+                    break
+                rest += chunk
+            self.assertNotIn(b"HTTP/1.1", rest)
+        finally:
+            s.close()
+
+    def test_invalid_length_is_400(self):
+        s = self._connect()
+        try:
+            s.sendall(b"POST /api/delete HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Length: abc\r\n\r\n")
+            head = self._read_until(s, b"\r\n\r\n", limit=8192)
+            self.assertIn(b" 400 ", head)
+        finally:
+            s.close()
+
+    def test_keepalive_still_works(self):
+        s = self._connect()
+        try:
+            for _ in range(2):
+                s.sendall(b"GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n")
+                data = self._read_until(s, b'"ok": true')
+                self.assertIn(b'"ok": true', data)
+        finally:
+            s.close()
+
+    def test_upload_endpoint_rejects_oversized_image(self):
+        import json as _json
+        import urllib.error
+        import urllib.request
+        body = _json.dumps({"width": 4000, "height": 4000, "gray_b64": "AAAA"}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self._port}/api/upload/image", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(ctx.exception.code, 400)
+        err = _json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertIn("过大", err["error"])
+
+    def test_serve_refuses_busy_port(self):
+        """端口已被占用时不再静默双开：serve() 打印提示并返回 1。"""
+        import shutil
+        import socket
+        import uuid
+
+        from cleaner_sim.server import serve
+        base = Path(__file__).resolve().parent / "_tmp"
+        base.mkdir(exist_ok=True)
+        d = base / f"busy-{uuid.uuid4().hex[:8]}"
+        try:
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                port = listener.getsockname()[1]
+                rc = serve(host="127.0.0.1", port=port, upload_dir=d)
+            self.assertEqual(rc, 1)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

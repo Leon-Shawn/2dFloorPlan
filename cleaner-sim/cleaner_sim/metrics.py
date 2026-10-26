@@ -55,7 +55,8 @@ def efficiency_metrics(occ: Occupancy, coverage: dict, plan_result,
         "path_efficiency": round(ideal_steps / steps, 4) if steps else 0.0,
         "reposition_ratio": plan_result.stats.get("reposition_ratio"),
         # repetition: how many extra passes each cleaned cell received on average
-        "disk_sweeps": total_sweeps,
+        # (footprint sweeps: the robot stamps its (2r+1)² square footprint每个位置)
+        "footprint_sweeps": total_sweeps,
         "repeat_rate": round(repeat_rate, 4),
         "effective_ratio": round(effective_ratio, 4),
         # unit efficiencies

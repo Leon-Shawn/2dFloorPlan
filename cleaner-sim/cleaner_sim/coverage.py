@@ -18,6 +18,8 @@ def _bbox(cells: list[int], width: int):
 
 def analyse_coverage(occ: Occupancy, view: RobotView, covered: bytearray) -> dict:
     width, height = occ.width, occ.height
+    if len(covered) != width * height:
+        raise ValueError(f"covered mask size {len(covered)} != grid {width}x{height}")
     area = occ.cell_area_m2
 
     walkable = occ.walkable
@@ -70,14 +72,20 @@ def analyse_coverage(occ: Occupancy, view: RobotView, covered: bytearray) -> dic
         idxs = dead_members.get(label, [])
         separated = sum(1 for i in idxs if view.unreachable[i])
         tight = sum(1 for i in idxs if view.tight[i])
-        is_separated = separated >= tight
+        if separated and tight:
+            reason, reason_text = ("mixed",
+                                   "混合死区：一部分与起点区域不连通（需分区多次清扫），"
+                                   "另一部分任何合法位姿都够不到")
+        elif separated:
+            reason, reason_text = ("separated",
+                                   "与起点区域不连通：通道容不下机器人本体，需分区多次清扫")
+        else:
+            reason, reason_text = ("tight", "空间过窄/位于死角，任何合法位姿都够不到")
         dead_clusters.append({
             "cells": cells,
             "area_m2": round(cells * area, 3),
-            "reason": "separated" if is_separated else "tight",
-            "reason_text": ("与起点区域不连通：通道容不下机器人本体，需分区多次清扫"
-                            if is_separated else
-                            "空间过窄/位于死角，任何合法位姿都够不到"),
+            "reason": reason,
+            "reason_text": reason_text,
             "separated_cells": separated,
             "tight_cells": tight,
             "bbox": _bbox(idxs, width),
@@ -104,7 +112,9 @@ def analyse_coverage(occ: Occupancy, view: RobotView, covered: bytearray) -> dic
         "tight_cells": G.count(view.tight),
         "tight_area_m2": round(G.count(view.tight) * area, 3),
         "tight_ratio": round(G.count(view.tight) / max(1, n_walkable), 4),
-        "robot_regions": len([s for s in view.stats.get("robot_region_sizes", []) if s >= 4]),
+        "robot_regions": view.stats.get(
+            "robot_regions",
+            len([s for s in view.stats.get("robot_region_sizes", []) if s >= 4])),
         "dead_clusters": dead_clusters,
         "regions": regions,
     }

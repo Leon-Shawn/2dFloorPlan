@@ -67,13 +67,13 @@ Boustrophedon Cellular Decomposition*, FSR 1998）：用一条扫描线扫过地
 
 | 变体 | 平均 steps/ideal | 总步数 | 相对旧版 | 最低覆盖率 | 平均规划耗时 |
 |---|---|---|---|---|---|
-| `legacy/overlap`（原实现） | 1.837 | 214,385 | — | 0.9953 | 0.75 s |
-| `legacy/exact`（只改间距） | 1.628 | 188,482 | −12.1% | 0.9954 | 0.74 s |
-| `bcd/overlap`（只改分解） | 1.797 | 200,413 | −6.5% | 0.9951 | 0.48 s |
+| `legacy/overlap`（原实现） | 1.837 | 214,425 | — | 0.9953 | 0.75 s |
+| `legacy/exact`（只改间距） | 1.627 | 188,482 | −12.1% | 0.9954 | 0.74 s |
+| `bcd/overlap`（只改分解） | 1.796 | 200,413 | −6.5% | 0.9951 | 0.48 s |
 | **`bcd/exact`（新默认）** | **1.555** | **172,001** | **−19.8%** | 0.9958 | **0.46 s** |
 
 - **总步数 −19.8%**，平均 `steps/ideal` 从 1.837 降到 1.555（−15.3%）；
-- **规划耗时 ×1.65**（0.75s → 0.46s），全量 45 张从 45.8s 降到 32.3s；
+- **规划耗时 ≈×1.6**（0.75 s → 0.46 s；2026-10 复测 0.76 s → 0.47 s）；
 - 复杂户型收益最大：38 房户型 `2.34 → 1.58`（−0.76 steps/ideal，步数 10449 → 7042，**−33%**）；
 - 没有任何户型明显变差（最大劣化 +0.15 steps/ideal）；
 - 覆盖率不降反升（最低可达覆盖率 0.9958，仍高于 0.995 目标）。
@@ -142,6 +142,9 @@ python run.py                      # http://127.0.0.1:8017
 python run.py --port 9000
 python run.py --data ../HouseExpo/json     # 用解压后的全量 35,126 张户型
 ```
+
+> 端口被占用时（包括"上一个实例没关干净"）会打印明确提示并以退出码 1 结束，
+> 不会静默启动第二个实例。
 
 数据目录自动探测：`--data` → `CLEANER_DATA` → `../HouseExpo/samples/json` → `../HouseExpo/json`。
 
@@ -232,7 +235,8 @@ cleaner-sim/
 - **上传**：拖拽/点选 → 图片实时调参预览 → 加入列表并直接开跑。
 - **户型选择**：缩略图墙（服务端实时栅格化），可按难度筛选、按 ID/房间类型搜索；上传的户型带「上传」角标，可删除。
 - **参数**：栅格分辨率、机器人直径、**扫描间距（精确/重叠）**、目标覆盖率、清扫速度。
-- **动画**：Canvas 逐格绘制，可切换「清扫热度 / 轨迹 / 不可达区域 / 分区着色」。
+- **动画**：Canvas 逐格绘制，可切换「清扫热度 / 轨迹 / 不可达区域 / 分区着色」；
+  机器人带**朝向箭头**（黄色实心箭头指向当前前进方向，起点处与仿真初始朝向一致）。
 - **回放**：播放/暂停/重置、0.5×–8× 倍速、步数进度条、点击阶段跳转。
 - **看板**：双环覆盖率、覆盖率-步数曲线、15 项指标卡、区域与死区清单、规划阶段清单、管线各阶段耗时。
 
@@ -262,7 +266,7 @@ PASS: browser replay reproduces the server coverage exactly on every case
 | GET | `/static/<file>` | 前端资源 |
 | GET | `/api/health` | 存活 + 数据集/上传目录 |
 | GET | `/api/floorplans` | 户型目录（内置 + 上传） |
-| GET | `/api/uploads` | 仅上传项及其解析诊断 |
+| GET | `/api/uploads` | 仅上传项的元数据列表（解析诊断随上传/重解析的响应返回） |
 | GET | `/api/thumb?id=&w=` | 户型缩略图（PNG） |
 | GET | `/api/run?id=&cell_cm=&robot_cm=&spacing_mode=&target_cov=&max_retreat=&speed_mps=&turn_time_s=` | 跑完整管线 |
 | POST | `/api/upload/houseexpo` | `{name, text}` 注册 HouseExpo JSON |
@@ -273,6 +277,10 @@ PASS: browser replay reproduces the server coverage exactly on every case
 | DELETE | `/api/upload/<id>` | 同上 |
 
 `/api/run` 结果按 (户型, 参数) 缓存；上传被修改或删除时相关缓存自动失效。
+户型在当前机器人尺寸下没有可行的清扫区域时，`/api/run` 返回 **422** 与中文提示（而非 500）。
+
+> ⚠️ 本服务只面向本机使用：写接口（上传 / 删除）没有鉴权，`--host` 传非回环地址时启动脚本
+> 会打印警告——请勿把本服务暴露到不可信网络。
 
 ---
 
@@ -281,7 +289,7 @@ PASS: browser replay reproduces the server coverage exactly on every case
 | 验证 | 结果 |
 |---|---|
 | 单元测试 | **36/36 通过**（栅格基元与暴力实现逐格对齐、A\* 绕障、BCD 单元恰好划分可达集、合并保持单调与划分、窄门洞必须切分区域、覆盖率集合互斥完备、时间轴单调、回放逐格一致、图像解析往返、上传注册与持久化…） |
-| 全量户型 | **45/45 规划成功**，平均全屋覆盖率 97.28%，平均 0.72 s，最慢 2.31 s |
+| 全量户型 | **45/45 规划成功**（批量脚本对不可规划的用户上传单独汇总、不误报为样例失败），平均全屋覆盖率 97.28%，平均 0.72 s，最慢 2.31 s（2026-10 复测通过） |
 | 路径算法基准 | 总步数 **−19.8%**，平均 `steps/ideal` **−15.3%**，规划耗时 **×1.65**，覆盖率不降 |
 | 图片解析往返 | 10 张合成户型图，面积偏差 ≤ **1.6%** |
 | 上传接口 | `tools/test_upload_api.py` **17/17 通过**（含非法输入拒绝） |
@@ -298,6 +306,9 @@ PASS: browser replay reproduces the server coverage exactly on every case
 - 机器人运动学是**质点 + 方形足迹**，未建模加减速与轮速约束。
 - 上传图片的解析依赖「墙线闭合 + 有页边距」；若平面图被裁到贴边，需手动调大封口半径
   （界面会给出「外轮廓疑似有缺口」提示）。
+- 解析质量门槛：墙体占比异常（>50%）或识别不到室内时会给出警告；机器人尺寸对某户型
+  无可行清扫区域时，仿真接口返回 422 与中文提示，而不是 500。
+- 本演示仅面向本机：写接口无鉴权，请勿以 `--host 0.0.0.0` 暴露到网络。
 - 性能瓶颈是纯 Python 的逐格循环；若要用 5cm 栅格或全量 35,126 张，建议把 `grid.py` 的
   腐蚀/膨胀/连通域换成 NumPy 或 C 扩展（接口不变）。
 
@@ -307,7 +318,8 @@ PASS: browser replay reproduces the server coverage exactly on every case
 
 户型数据来自 [HouseExpo](https://github.com/TeaganLi/HouseExpo)（MIT License, Copyright (c) 2019
 Tingguang Li；论文 IROS 2020, arXiv:1903.09845）。项目自带 45 张样例位于
-`../HouseExpo/samples/json`，完整 35,126 张可用 `../HouseExpo/tools/extract_dataset.ps1`
-解压后以 `--data` 指定。使用时请保留上游 `LICENSE` 并按上游 README 引用。
+`../HouseExpo/samples/json`；完整 35,126 张数据集需从上游仓库自行下载并解压
+（当前工作区不含 `json.tar.gz` 与解压脚本），随后以 `--data <目录>` 指定。
+使用时请保留上游 `LICENSE` 并按上游 README 引用。
 
 路径算法参考 Choset & Pignon (FSR 1998) 及上述开源实现，均为独立重写，未复制其代码。

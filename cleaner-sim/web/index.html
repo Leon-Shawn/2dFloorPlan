@@ -54,12 +54,12 @@
     <section class="block">
       <h2 class="block-title"><b>2</b> 仿真参数</h2>
       <div class="field">
-        <label>栅格分辨率 <output id="cellOut">10 cm / 格</output></label>
+        <label for="cellCm">栅格分辨率 <output id="cellOut">10 cm / 格</output></label>
         <input id="cellCm" type="range" min="4" max="25" step="1" value="10">
         <p class="tip">栅格越小越精细，规划耗时按面积平方增长。</p>
       </div>
       <div class="field">
-        <label>机器人直径 <output id="robotOut">34 cm</output></label>
+        <label for="robotCm">机器人直径 <output id="robotOut">34 cm</output></label>
         <input id="robotCm" type="range" min="12" max="70" step="2" value="34">
         <p class="tip">碰撞与清扫都按 <em>2r+1</em> 格方形足迹建模。</p>
       </div>
@@ -71,11 +71,11 @@
         </select>
       </div>
       <div class="field">
-        <label>目标覆盖率 <output id="covOut">99.5%</output></label>
+        <label for="targetCov">目标覆盖率 <output id="covOut">99.5%</output></label>
         <input id="targetCov" type="range" min="80" max="100" step="0.5" value="99.5">
       </div>
       <div class="field">
-        <label>清扫速度 <output id="speedOut">0.25 m/s</output></label>
+        <label for="speedMps">清扫速度 <output id="speedOut">0.25 m/s</output></label>
         <input id="speedMps" type="range" min="5" max="120" step="5" value="25">
       </div>
       <button id="runBtn" class="btn btn-primary" disabled>开始仿真</button>
@@ -106,6 +106,8 @@
         <span><i class="sw sw-floor"></i>待清扫</span>
         <span><i class="sw sw-sep"></i>不可达（需分区）</span>
         <span><i class="sw sw-tight"></i>死角</span>
+        <span><i class="sw sw-robot"></i>机器人</span>
+        <span><i class="sw sw-dir"></i>朝向</span>
       </div>
       <div class="canvas-empty" id="canvasEmpty">等待仿真数据…</div>
     </div>
@@ -172,10 +174,10 @@
 </main>
 
 <!-- ============================ 图片解析调参弹层 ============================ -->
-<div class="modal" id="imgModal" hidden>
+<div class="modal" id="imgModal" role="dialog" aria-modal="true" aria-labelledby="imgModalTitle" hidden>
   <div class="modal-mask" id="imgMask"></div>
   <div class="modal-box">
-    <h3>解析户型图 <em id="imgName"></em></h3>
+    <h3 id="imgModalTitle">解析户型图 <em id="imgName"></em></h3>
     <p class="tip">左侧是原图，右侧是 Python 管线解析出的墙体（黑）与可通行区域（白）。调整参数直到墙体闭合、房间干净。</p>
     <div class="img-grid">
       <figure><img id="srcPreview" alt="原图"><figcaption>原图</figcaption></figure>
@@ -183,17 +185,17 @@
     </div>
     <div class="img-fields">
       <div class="field">
-        <label>二值化阈值 <output id="thrOut">自动</output></label>
+        <label for="thr">二值化阈值 <output id="thrOut">自动</output></label>
         <input id="thr" type="range" min="0" max="255" step="1" value="128">
         <label class="switch thin"><input id="thrAuto" type="checkbox" checked><span>自动（Otsu）</span></label>
       </div>
       <div class="field">
-        <label>封口半径 <output id="sealOut">2 px</output></label>
+        <label for="seal">封口半径 <output id="sealOut">2 px</output></label>
         <input id="seal" type="range" min="0" max="8" step="1" value="2">
         <p class="tip">墙线有断口时调大，可避免外部区域被误判为室内。</p>
       </div>
       <div class="field">
-        <label>户型实际宽度 <output id="realWOut">10.0 m</output></label>
+        <label for="realW">户型实际宽度 <output id="realWOut">10.0 m</output></label>
         <input id="realW" type="range" min="2" max="60" step="0.5" value="10">
         <p class="tip">图片没有比例尺，需要你给出户型的真实宽度来换算米。</p>
       </div>

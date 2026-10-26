@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,9 +92,9 @@ def resolve_data_dir(explicit: str | None = None) -> Path:
         if p.is_dir() and any(p.glob("*.json")):
             return p
     raise FileNotFoundError(
-        "no HouseExpo floorplans found. Pass --data <dir> or set CLEANER_DATA. "
-        "Extract the dataset with HouseExpo/tools/extract_dataset.ps1, or point at "
-        "HouseExpo/samples/json."
+        "no HouseExpo floorplans found. Pass --data <dir> or set CLEANER_DATA, "
+        "or point it at a directory of HouseExpo JSON files "
+        "(the bundled samples live in HouseExpo/samples/json)."
     )
 
 
@@ -126,6 +127,7 @@ class FloorplanLibrary:
         self.data_dir = resolve_data_dir(data_dir)
         self._plans: dict[str, Floorplan] = {}
         self._order: list[str] = []
+        self._lock = threading.Lock()          # 懒加载缓存，多线程下需串行
         self._index()
 
     def _index(self) -> None:
@@ -151,12 +153,17 @@ class FloorplanLibrary:
         return list(self._order)
 
     def get(self, fid: str) -> Floorplan:
-        if fid not in self._plans:
+        with self._lock:
+            plan = self._plans.get(fid)
+            if plan is not None:
+                return plan
             path = self._files.get(fid)
-            if path is None:
-                raise KeyError(f"unknown floorplan id: {fid}")
-            self._plans[fid] = load_floorplan(path)
-        return self._plans[fid]
+        if path is None:
+            raise KeyError(f"unknown floorplan id: {fid}")
+        plan = load_floorplan(path)
+        with self._lock:
+            plan = self._plans.setdefault(fid, plan)
+        return plan
 
     def list_meta(self) -> list[dict]:
         out = []

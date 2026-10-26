@@ -169,6 +169,8 @@ input[type=range]:disabled{opacity:.45}
 .sw-floor{background:#d9e2ef}
 .sw-sep{background:#6b4b8f}
 .sw-tight{background:#f0a92b}
+.sw-robot{background:#4f7cff}
+.sw-dir{background:#ffd166}
 
 .controls{display:flex;align-items:center;gap:10px;flex:0 0 auto}
 .controls input[type=range]{flex:1 1 auto}
@@ -221,6 +223,7 @@ input[type=range]:disabled{opacity:.45}
 .row .rsub{grid-column:1/-1;font-size:11px;color:var(--ink-mute);font-family:var(--mono)}
 .row.tag-sep .rval{color:var(--violet)}
 .row.tag-tight .rval{color:var(--amber)}
+.row.tag-mixed .rval{color:var(--rose)}
 .row.bar{display:block;padding:0;background:none;border:none}
 .bar-track{height:6px;border-radius:4px;background:#242d3b;overflow:hidden;margin-top:4px}
 .bar-fill{height:100%;background:linear-gradient(90deg,var(--brand),var(--teal));width:0;transition:width .3s}
@@ -292,7 +295,23 @@ select.wide:focus{border-color:var(--brand)}
   display:grid;place-items:center;opacity:0;transition:opacity .15s;
 }
 .card:hover .del{opacity:1}
+.card:focus .del,.card:focus-within .del{opacity:1}
 .card .del:hover{background:var(--rose)}
+
+/* --------------------------------------------------------------- 键盘可达 */
+.card:focus-visible,.row.clickable:focus-visible,.del:focus-visible,
+.btn:focus-visible,.switch input:focus-visible{
+  outline:2px solid var(--brand-2);outline-offset:1px;
+}
+.modal-box:focus{outline:none}
+
+/* ------------------------------------------------------------- 动效减弱 */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important;scroll-behavior:auto!important;
+  }
+}
 
 /* --------------------------------------------------------------- responsive */
 @media (max-width:1420px){

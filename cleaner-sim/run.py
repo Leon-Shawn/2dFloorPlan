@@ -26,8 +26,10 @@ def main() -> int:
     ap.add_argument("--data", default=None,
                     help="directory of HouseExpo floorplan JSONs")
     args = ap.parse_args()
-    serve(host=args.host, port=args.port, data_dir=args.data)
-    return 0
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"[警告] --host {args.host}：写接口（上传/删除）没有鉴权，"
+              f"请勿把本服务暴露到不可信网络。")
+    return serve(host=args.host, port=args.port, data_dir=args.data)
 
 
 if __name__ == "__main__":

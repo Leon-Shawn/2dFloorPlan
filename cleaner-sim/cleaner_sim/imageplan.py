@@ -25,9 +25,32 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from . import grid as G
-from .rasterize import FineMask
+from .rasterize import FineMask, _pad_mask
 
 GRAY_MAGIC = b"CLEANERGRAY1"
+
+# 自动阈值重试：Otsu 对"深色主墙线 + 浅灰细节线（窗线等）"的图容易取低，
+# 导致外轮廓不闭合、洪泛泄漏。识别失败时按此阶梯向上试探。
+_AUTO_THRESHOLD_STEPS = (0.15, 0.30, 0.45, 0.60, 0.75, 0.90)
+_THRESHOLD_CAP = 250          # 255 会把整图判成墙，留出余量
+
+
+def _parse_quality_ok(diag: dict) -> bool:
+    """判断一次解析是否"像一张正常户型图"：室内占比合理且墙体不过量。"""
+    return (0.15 <= diag["free_fraction"] <= 0.70
+            and diag["wall_fraction"] <= 0.5)
+
+
+def _crop_mask(mask: bytearray, width: int, height: int, pad: int) -> bytearray:
+    """Inverse of `rasterize._pad_mask`: strip a `pad`-wide border again."""
+    if pad <= 0:
+        return mask
+    nw = width + 2 * pad
+    out = bytearray(width * height)
+    for y in range(height):
+        src = (y + pad) * nw + pad
+        out[y * width:(y + 1) * width] = mask[src:src + width]
+    return out
 
 
 # ------------------------------------------------------------------- thresholding
@@ -115,17 +138,9 @@ def _flood_outside(wall: bytearray, width: int, height: int) -> bytearray:
     return outside
 
 
-def parse_floorplan_image(gray, width: int, height: int,
-                          params: ImageParseParams) -> tuple[FineMask, dict]:
-    """Grayscale floorplan image -> (FineMask, diagnostics)."""
-    if width < 8 or height < 8:
-        raise ValueError("image too small to parse")
-    if len(gray) != width * height:
-        raise ValueError("grayscale buffer size does not match width*height")
-
-    threshold = params.threshold if params.threshold is not None else otsu_threshold(gray)
-    threshold = max(0, min(255, int(threshold)))
-
+def _parse_at_threshold(gray, width: int, height: int,
+                        params: ImageParseParams, threshold: int) -> tuple[FineMask, dict]:
+    """One full parse pass at a fixed threshold level."""
     # 1. threshold -> walls
     wall = bytearray(width * height)
     for i, v in enumerate(gray):
@@ -133,10 +148,16 @@ def parse_floorplan_image(gray, width: int, height: int,
         wall[i] = 1 if (dark != params.invert) else 0
     wall_fraction = G.count(wall) / (width * height)
 
-    # 2. close the wall outline so the flood fill cannot leak through pinholes
+    # 2. close the wall outline so the flood fill cannot leak through pinholes.
+    #    Pad the mask first: `erode_square` treats the map border as outside, so
+    #    without padding a wall running along the image edge would be erased
+    #    entirely — re-opening exactly the gap the closing is meant to seal.
     if params.seal_px > 0:
-        d = G.dilate_square(wall, width, height, params.seal_px)
-        wall = G.erode_square(d, width, height, params.seal_px)
+        r = params.seal_px
+        padded, pw, ph = _pad_mask(wall, width, height, r)
+        closed = G.dilate_square(padded, pw, ph, r)
+        closed = G.erode_square(closed, pw, ph, r)
+        wall = _crop_mask(closed, width, height, r)
 
     # 3+4. outside the building vs inside it
     outside = _flood_outside(wall, width, height)
@@ -145,10 +166,24 @@ def parse_floorplan_image(gray, width: int, height: int,
 
     warnings = []
     free_fraction = sum(free) / (width * height)
+    if wall_fraction > 0.5:
+        if params.invert:
+            warnings.append("已勾选「墙体为浅色」，但识别出的墙体超过一半："
+                            "这张图很可能是白底深色墙线的常规户型图——"
+                            "请「取消勾选」后重新解析")
+        else:
+            warnings.append("识别出的墙体超过一半：原图可能是深底浅色墙线——"
+                            "请勾选「墙体为浅色」，或检查阈值")
     if free_fraction > 0.7:
-        warnings.append("外轮廓疑似有缺口，墙外区域被误判为室内：请增大「封口半径」或调整阈值")
+        warnings.append("外轮廓疑似有缺口，墙外区域被误判为室内："
+                        "请增大「封口半径」或调高阈值")
     if free_fraction < 0.02:
-        warnings.append("几乎没有识别到室内区域：请检查阈值，或勾选「墙体为浅色」")
+        if params.invert:
+            warnings.append("几乎没有识别到室内区域（且已勾选「墙体为浅色」）："
+                            "若原图是白底深色墙线，请先「取消勾选」；否则请调整阈值")
+        else:
+            warnings.append("几乎没有识别到室内区域：墙线在窗户/门洞处可能有缺口——"
+                            "请调高阈值或增大「封口半径」")
 
     # 5. drop specks (text, dimension arrows, dust) and keep the real floor
     labels, sizes = G.label_components(free, width, height, 4)
@@ -163,7 +198,13 @@ def parse_floorplan_image(gray, width: int, height: int,
     xs = [i % width for i, v in enumerate(free) if v]
     ys = [i // width for i, v in enumerate(free) if v]
     if not xs:
-        raise ValueError("未能在图中找到封闭的户型区域：请调低/调高阈值，或勾选「墙体为浅色」")
+        if params.invert:
+            raise ValueError(
+                "未能在图中找到封闭的户型区域（已勾选「墙体为浅色」）："
+                "若原图是白底深色墙线，请「取消勾选」后重试；否则请调整阈值")
+        raise ValueError(
+            "未能在图中找到封闭的户型区域：请调低/调高阈值，"
+            "或勾选「墙体为浅色」（仅当原图为深底浅色墙线时）")
 
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
     cw, ch = x1 - x0 + 1, y1 - y0 + 1
@@ -198,6 +239,7 @@ def parse_floorplan_image(gray, width: int, height: int,
     diagnostics = {
         "threshold": threshold,
         "threshold_auto": params.threshold is None,
+        "threshold_auto_adjusted": False,
         "invert": params.invert,
         "seal_px": params.seal_px,
         "image_px": [width, height],
@@ -212,6 +254,59 @@ def parse_floorplan_image(gray, width: int, height: int,
         "warnings": warnings,
     }
     return fine, diagnostics
+
+
+def parse_floorplan_image(gray, width: int, height: int,
+                          params: ImageParseParams) -> tuple[FineMask, dict]:
+    """Grayscale floorplan image -> (FineMask, diagnostics).
+
+    自动阈值（params.threshold=None）分两步：
+      1) 先用 Otsu 跑一遍；
+      2) 若结果不像一张正常户型图（室内占比 <15% 或 >70%，或墙体超过一半），
+         通常是墙线细节（如浅灰色的窗线）落在阈值之上、外轮廓未闭合导致的
+         洪泛泄漏——按阶梯向上试探候选阈值，取第一个"像正常户型图"的结果，
+         并在 diagnostics 中标记 threshold_auto_adjusted。
+    手动指定阈值时不重试，尊重用户选择。
+    """
+    if width < 8 or height < 8:
+        raise ValueError("image too small to parse")
+    if len(gray) != width * height:
+        raise ValueError("grayscale buffer size does not match width*height")
+
+    if params.threshold is not None:
+        return _parse_at_threshold(gray, width, height, params,
+                                   max(0, min(255, int(params.threshold))))
+
+    base = max(0, min(255, int(otsu_threshold(gray))))
+    base_error = None
+    try:
+        fine, diag = _parse_at_threshold(gray, width, height, params, base)
+    except ValueError as exc:
+        fine, diag, base_error = None, None, exc
+
+    if fine is not None and _parse_quality_ok(diag):
+        return fine, diag
+
+    candidates = sorted({min(_THRESHOLD_CAP, round(base + (_THRESHOLD_CAP - base) * f))
+                         for f in _AUTO_THRESHOLD_STEPS})
+    for t in candidates:
+        if t <= base:
+            continue
+        try:
+            cand_fine, cand_diag = _parse_at_threshold(gray, width, height, params, t)
+        except ValueError:
+            continue
+        if _parse_quality_ok(cand_diag):
+            cand_diag["threshold_auto_adjusted"] = True
+            cand_diag["threshold_auto_base"] = base
+            cand_diag["warnings"].insert(
+                0, f"自动阈值已从 {base} 优化为 {t}"
+                   f"（原阈值下墙线轮廓未闭合，外部区域会泄漏进室内）")
+            return cand_fine, cand_diag
+
+    if fine is None:
+        raise base_error
+    return fine, diag
 
 
 # ------------------------------------------------------- grayscale cache on disk

@@ -9,9 +9,9 @@ Replay payload design
 ---------------------
 The route is 4/8-connected, so it is shipped as one *movement code* byte per step
 plus the start cell. The browser replays it by walking the codes, and reproduces the
-covered area by stamping the same integer cleaning disk at every visited cell — the
-identical rule the server uses, so the animation and the numbers always agree. That
-keeps the payload a few kilobytes instead of shipping a grid per frame.
+covered area by stamping the same integer square footprint at every visited cell —
+the identical rule the server uses, so the animation and the numbers always agree.
+That keeps the payload a few kilobytes instead of shipping a grid per frame.
 """
 from __future__ import annotations
 

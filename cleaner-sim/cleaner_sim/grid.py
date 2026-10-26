@@ -10,7 +10,8 @@ Conventions used across the project
 * mask value ``1`` = true/in-set, ``0`` = false.
 * ``passable``  = floor cells (the area that *should* be cleaned).
 * ``center_ok`` = cells where the robot's body fits without touching a wall
-  (``passable`` eroded by the robot disk). Only these can be robot positions.
+  (``passable`` eroded by the robot's square footprint). Only these can be robot
+  positions.
 """
 from __future__ import annotations
 
@@ -45,20 +46,6 @@ def stamp(mask: bytearray, width: int, height: int, cx: int, cy: int,
                 mask[i] = value
                 changed += 1
     return changed
-
-
-def stamp_changed(mask: bytearray, width: int, height: int, cx: int, cy: int,
-                  offsets) -> list[int]:
-    """Like `stamp` but returns the list of indices that flipped 0 -> 1."""
-    flipped = []
-    for dx, dy in offsets:
-        x, y = cx + dx, cy + dy
-        if 0 <= x < width and 0 <= y < height:
-            i = y * width + x
-            if mask[i] == 0:
-                mask[i] = 1
-                flipped.append(i)
-    return flipped
 
 
 def erode(src: bytearray, width: int, height: int, radius: int) -> bytearray:
@@ -173,27 +160,24 @@ def stamp_square(mask: bytearray, width: int, height: int, cx: int, cy: int,
         mask[base + x0:base + x1 + 1] = fill
 
 
-def square_scan(mask: bytearray, width: int, height: int, cx: int, cy: int,
-                radius: int):
-    """Indices inside the (2r+1)^2 square around (cx, cy) that are set in `mask`."""
-    hits = []
-    for y in range(max(0, cy - radius), min(height - 1, cy + radius) + 1):
-        base = y * width
-        for x in range(max(0, cx - radius), min(width - 1, cx + radius) + 1):
-            if mask[base + x]:
-                hits.append(base + x)
-    return hits
+def _check_same_len(a, b) -> None:
+    """Guard the zip-based set operations below against silent truncation."""
+    if len(a) != len(b):
+        raise ValueError(f"mask size mismatch: {len(a)} != {len(b)}")
 
 
 def union(a: bytearray, b: bytearray) -> bytearray:
+    _check_same_len(a, b)
     return bytearray(1 if (x or y) else 0 for x, y in zip(a, b))
 
 
 def intersection(a: bytearray, b: bytearray) -> bytearray:
+    _check_same_len(a, b)
     return bytearray(1 if (x and y) else 0 for x, y in zip(a, b))
 
 
 def difference(a: bytearray, b: bytearray) -> bytearray:
+    _check_same_len(a, b)
     return bytearray(1 if (x and not y) else 0 for x, y in zip(a, b))
 
 

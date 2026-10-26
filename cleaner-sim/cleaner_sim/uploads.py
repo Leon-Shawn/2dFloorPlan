@@ -15,8 +15,11 @@ building, robot modelling, planning, coverage, replay — is shared.
 """
 from __future__ import annotations
 
+import functools
 import json
+import os
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -46,12 +49,27 @@ class Upload:
     gray_size: list = field(default_factory=list)
 
 
+def _locked(method):
+    """Serialize access to the store with its re-entrant lock.
+
+    The HTTP server is threaded (`ThreadingHTTPServer`), so every public
+    read/write of `items` / `index.json` must hold `self._lock`.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class UploadStore:
     def __init__(self, directory: str | Path):
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.dir / "index.json"
         self.items: dict[str, Upload] = {}
+        self._lock = threading.RLock()
         self._load()
 
     # ------------------------------------------------------------------ index
@@ -60,7 +78,17 @@ class UploadStore:
             return
         try:
             raw = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except ValueError:
+            bad = self.index_path.with_name("index.json.bad")
+            try:
+                bad.write_bytes(self.index_path.read_bytes())
+            except OSError:
+                pass
+            print(f"[uploads] {self.index_path.name} 解析失败，已备份为 {bad.name}，"
+                  f"本次从空索引启动")
+            return
+        except OSError as exc:
+            print(f"[uploads] 无法读取 {self.index_path.name}：{exc}（本次从空索引启动）")
             return
         for item in raw.get("uploads", []):
             try:
@@ -71,9 +99,17 @@ class UploadStore:
                 self.items[up.id] = up
 
     def _save(self) -> None:
+        """Persist the index atomically (write temp file + os.replace).
+
+        Callers must hold `self._lock`; a half-written index.json used to be
+        possible under concurrent uploads, which then silently wiped the
+        upload history on the next start (`_load` swallowed the error).
+        """
         payload = {"uploads": [asdict(u) for u in self.items.values()]}
-        self.index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                                   encoding="utf-8")
+        text = json.dumps(payload, ensure_ascii=False, indent=1)
+        tmp = self.index_path.with_name(self.index_path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, self.index_path)
 
     def _exists(self, up: Upload) -> bool:
         suffix = ".json" if up.kind == "houseexpo" else ".gray"
@@ -89,6 +125,7 @@ class UploadStore:
         return candidate
 
     # -------------------------------------------------------------- houseexpo
+    @_locked
     def add_houseexpo(self, name: str, text: str) -> Upload:
         if len(text.encode("utf-8")) > MAX_JSON_BYTES:
             raise ValueError("JSON 文件过大（上限 4 MB）")
@@ -114,6 +151,7 @@ class UploadStore:
         return up
 
     # ------------------------------------------------------------------ image
+    @_locked
     def add_image(self, name: str, gray: bytes, width: int, height: int,
                   params: ImageParseParams) -> Upload:
         if width * height > MAX_GRAY_PIXELS:
@@ -128,6 +166,7 @@ class UploadStore:
         self.reparse_image(uid, params)
         return self.items[uid]
 
+    @_locked
     def reparse_image(self, uid: str, params: ImageParseParams) -> Upload:
         up = self.items.get(uid)
         if up is None or up.kind != "image":
@@ -148,12 +187,18 @@ class UploadStore:
         return up
 
     # ----------------------------------------------------------------- access
+    @_locked
+    def contains(self, uid: str) -> bool:
+        return uid in self.items
+
+    @_locked
     def get(self, uid: str) -> Upload:
         up = self.items.get(uid)
         if up is None:
             raise KeyError(f"unknown upload: {uid}")
         return up
 
+    @_locked
     def source(self, uid: str):
         """Return the floorplan source (Floorplan or FineMask) for this upload."""
         up = self.get(uid)
@@ -166,6 +211,7 @@ class UploadStore:
         up.diagnostics = diag
         return fine
 
+    @_locked
     def thumbnail(self, uid: str, width: int = 168) -> bytes:
         up = self.get(uid)
         if up.kind == "image":
@@ -176,6 +222,7 @@ class UploadStore:
         from .rasterize import thumbnail_png
         return thumbnail_png(self.source(uid), target_w=width)
 
+    @_locked
     def list_meta(self) -> list[dict]:
         out = []
         for up in sorted(self.items.values(), key=lambda u: u.created, reverse=True):
@@ -190,6 +237,7 @@ class UploadStore:
             out.append(meta)
         return out
 
+    @_locked
     def delete(self, uid: str) -> bool:
         up = self.items.pop(uid, None)
         if up is None:

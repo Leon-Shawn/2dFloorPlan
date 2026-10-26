@@ -24,7 +24,7 @@ Pipeline
    start region, i.e. the robot walks room to room through the doorways.
 6. **Dead-zone retreat (死角回退)** — whatever is still dirty is clustered, and each
    cluster is re-planned as a local serpentine over exactly those robot positions
-   whose cleaning disk can touch it. This is the "fall back and re-divide the
+   whose cleaning square footprint can touch it. This is the "fall back and re-divide the
    region" mechanism the brief calls the hardest part, and it lifts coverage from
    ~95% to ~99%+ around corners and inside narrow nooks.
 """

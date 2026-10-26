@@ -197,7 +197,7 @@ def decompose_bcd(mask: bytearray, width: int, height: int, axis: str):
         i0, i1 = critical[s], critical[s + 1] - 1
         if i1 < i0:
             continue
-        for run_index, (a, b) in enumerate(structure[i0]):
+        for a, b in structure[i0]:
             cid += 1
             cell = Cell(cid=cid, x0=0, y0=0, x1=0, y1=0, count=0)
             if axis == "x":
@@ -337,6 +337,9 @@ def merge_cells(labels: list, cells: dict, width: int, height: int):
             target.x1 = max(target.x1, other.x1)
             target.y1 = max(target.y1, other.y1)
             target.count += other.count
+            # Invariant: `keep` must become the find() root of `drop` — the relabel
+            # pass below resolves every label through find(), so a missing entry
+            # here would raise KeyError in remap.
             parent[drop] = keep
             del groups[drop]
             changed = True
@@ -399,9 +402,9 @@ def _lines_for_cell(labels, width: int, cid: int, cell: Cell, vertical: bool):
 def _cheap_cell_route(lines: list[dict], spacing: int, width: int):
     """Manhattan-only estimate of a cell's serpentine, with no A* calls.
 
-    Returns ``(steps, first_cell, last_cell)`` where `steps` counts both the cleaned
-    cells and the repositioning between runs, using Manhattan distance as the proxy
-    for connector length. Cheap enough to evaluate several candidate decompositions.
+    Returns ``(clean, moves, first_cell, last_cell)``: `clean` counts swept cells
+    and `moves` the Manhattan proxy for repositioning between runs. Cheap enough
+    to evaluate several candidate decompositions.
     """
     selected = select_lines(lines, spacing, 0)
     clean = 0
@@ -467,7 +470,11 @@ def _manhattan(a: int, b: int, width: int) -> int:
 
 
 def order_routes(routes: list[list[int]], start: int, width: int, optimize: bool = True):
-    """Greedy nearest-neighbour over route ends, then 2-opt with orientation flips.
+    """Greedy nearest-neighbour over route ends, then a bounded 2-opt.
+
+    The 2-opt is deliberately bounded (≤40 rounds, first improvement, full rescans)
+    — it uses Manhattan distance on route ends only, so it is a heuristic polish,
+    not an exact open-path TSP.
 
     Returns a list of ``(route_index, flipped)``.
     """
@@ -783,7 +790,8 @@ def plan_coverage(occ: Occupancy, view: RobotView, target_cov: float = 0.995,
     result.stats = {
         "steps": len(result.path),
         "algorithm": "bcd",
-        "spacing_mode": spacing_mode,
+        # 回显实际生效的模式：未知取值会静默回落 exact，不能把用户字符串原样上报
+        "spacing_mode": spacing_mode if spacing_mode in SPACING_MODES else "exact",
         "sweep_spacing_cells": spacing,
         "decomposition_axis": axis,
         "cells": len(routes),

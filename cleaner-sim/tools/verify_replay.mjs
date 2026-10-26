@@ -120,6 +120,11 @@ console.log(' rounds its reported ratios to 4 decimals, hence the ratio toleranc
 for (const meta of unique) {
   const res = await get(`/api/run?id=${encodeURIComponent(meta.id)}&cell_cm=10&robot_cm=34`);
   if (res.status !== 200) {
+    if (meta.custom) {
+      console.log(`${String(meta.room_num).padStart(5)}  HTTP ${res.status}  `
+        + 'SKIP（用户上传，自身不可规划）');
+      continue;
+    }
     console.log(`${String(meta.room_num).padStart(5)}  HTTP ${res.status}`);
     failures++;
     continue;

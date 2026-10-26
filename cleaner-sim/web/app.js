@@ -27,6 +27,7 @@ const state = {
   cells: null, phaseOfStep: null,
   phases: [],
   step: 0, playing: false, rate: 1, baseRate: 60, lastT: 0,
+  rafId: 0, reqSeq: 0,
   off: null, octx: null, img: null,
 };
 
@@ -87,9 +88,10 @@ function renderPicker() {
       if (!hay.includes(q)) continue;
     }
     shown++;
-    const btn = document.createElement('button');
+    const btn = document.createElement('div');   // div[role=button]：卡片内还有删除按钮，避免嵌套 <button>
     btn.className = 'card' + (state.selected === p.id ? ' active' : '');
-    btn.type = 'button';
+    btn.setAttribute('role', 'button');
+    btn.tabIndex = 0;
     btn.title = `${p.id}\n${p.room_num} 房间 · ${p.size_x_m}×${p.size_y_m} m · ${p.area_m2} m²`
       + (custom ? '\n（用户上传）' : '');
     const label = (p.name || p.id).slice(0, 18);
@@ -102,6 +104,9 @@ function renderPicker() {
     btn.onclick = (ev) => {
       if (ev.target.classList.contains('del')) return;
       selectFloorplan(p.id);
+    };
+    btn.onkeydown = (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectFloorplan(p.id); }
     };
     const del = btn.querySelector('.del');
     if (del) del.onclick = (ev) => { ev.stopPropagation(); deleteUpload(p.id); };
@@ -126,6 +131,7 @@ function selectFloorplan(id) {
 /* =============================================================== 运行仿真 */
 async function runSimulation() {
   if (!state.selected) return;
+  const seq = ++state.reqSeq;             // 请求序号：迟到的旧响应一律丢弃
   const params = new URLSearchParams({
     id: state.selected,
     cell_cm: $('cellCm').value,
@@ -146,17 +152,21 @@ async function runSimulation() {
   try {
     const res = await fetch('/api/run?' + params.toString());
     const json = await res.json();
+    if (seq !== state.reqSeq) return;     // 已有更新的请求（或删除操作），丢弃本次结果
     if (!res.ok || json.error) throw new Error(json.error || ('HTTP ' + res.status));
     prepare(json);
     $('metaStatus').className = 'chip chip-ok';
     $('metaStatus').textContent = '就绪';
   } catch (err) {
+    if (seq !== state.reqSeq) return;
     toast('仿真失败：' + err.message, 6000);
     $('metaStatus').className = 'chip chip-err';
     $('metaStatus').textContent = '失败';
   } finally {
-    btn.disabled = false;
-    btn.textContent = '开始仿真';
+    if (seq === state.reqSeq) {
+      btn.disabled = false;
+      btn.textContent = '开始仿真';
+    }
   }
 }
 
@@ -200,13 +210,19 @@ function prepare(data) {
     console.warn('重放覆盖率与服务端不一致', state.selfCheck);
   }
 
-  /* 每一步属于哪个规划阶段（用于分区着色） */
-  const phaseOfStep = new Int16Array(cells.length);
-  state.phases.forEach((p, idx) => {
-    for (let s = p.start_step; s <= p.end_step && s < phaseOfStep.length; s++) {
-      if (s >= 0 && phaseOfStep[s] === 0) phaseOfStep[s] = idx + 1;
+  /* 每一步属于哪个规划阶段（用于分区着色）
+     -1 哨兵 + 两遍填充：先让细分相位（单元 / 死区回退）占位，主扫只补剩余步。
+     否则主扫相位会“先到先得”占满整个主扫区间，单元相位永远拿不到自己的颜色。 */
+  const phaseOfStep = new Int16Array(cells.length).fill(-1);
+  const claim = (p, idx) => {
+    const from = Math.max(0, p.start_step);
+    const to = Math.min(p.end_step, phaseOfStep.length - 1);
+    for (let s = from; s <= to; s++) {
+      if (phaseOfStep[s] === -1) phaseOfStep[s] = idx + 1;
     }
-  });
+  };
+  state.phases.forEach((p, idx) => { if (p.kind !== 'sweep') claim(p, idx); });
+  state.phases.forEach((p, idx) => { if (p.kind === 'sweep') claim(p, idx); });
   state.phaseOfStep = phaseOfStep;
 
   const off = state.off || (state.off = document.createElement('canvas'));
@@ -269,12 +285,15 @@ function bake() {
 function fitCanvas() {
   const cv = $('view');
   const wrap = cv.parentElement;
+  const dpr = window.devicePixelRatio || 1;
   const availW = wrap.clientWidth - 4, availH = wrap.clientHeight - 4;
   const scale = Math.min(availW / state.w, availH / state.h);
-  cv.width = Math.max(80, Math.round(state.w * scale));
-  cv.height = Math.max(80, Math.round(state.h * scale));
-  cv.style.width = cv.width + 'px';
-  cv.style.height = cv.height + 'px';
+  const cssW = Math.max(80, Math.round(state.w * scale));
+  const cssH = Math.max(80, Math.round(state.h * scale));
+  cv.width = Math.round(cssW * dpr);        // backing store 按 dpr 放大，HiDPI 下不模糊
+  cv.height = Math.round(cssH * dpr);
+  cv.style.width = cssW + 'px';
+  cv.style.height = cssH + 'px';
 }
 
 function phaseColor(idx) {
@@ -332,7 +351,7 @@ function render() {
           r = 34 + 215 * t; g = 195 - 150 * t; b = 166 - 110 * t;
         } else if (phaseOn && phaseOfStep) {
           const ph = phaseOfStep[cleanedAt[i]];
-          const c = phaseColors[ph - 1] || [34, 195, 166];
+          const c = (ph > 0 && phaseColors[ph - 1]) || [34, 195, 166];
           r = c[0]; g = c[1]; b = c[2];
         } else {
           [r, g, b] = PALETTE.clean;
@@ -382,22 +401,49 @@ function render() {
   ctx.lineWidth = 1.5;
   ctx.strokeRect(fx + 0.5, fy + 0.5, fw - 1, fh - 1);
 
+  /* 机器人：方形足迹 + 朝向箭头
+     朝向以前进方向为准；静止在起点时与仿真模型的初始朝向一致（+x 方向）。
+     设计：圆形机身 + 从机身伸出的"箭杆 + 实心三角箭头"，带描边阴影，
+     保证在深色墙体、浅色地面、青色已清扫区域上都有足够对比度。 */
   const prev = state.cells[Math.max(0, Math.min(S, state.cells.length - 1) - 1)];
   const py = (prev / w) | 0, px = prev - py * w;
   let hx = cx - px, hy = cy - py;
-  if (hx === 0 && hy === 0) { hx = 1; hy = 0; }
+  if (hx === 0 && hy === 0) { hx = 1; hy = 0; }    // 起点：与 simulate.py 初始朝向（+x）一致
   const hl = Math.hypot(hx, hy) || 1;
+  const ux = hx / hl, uy = hy / hl;
   const cxp = (cx + 0.5) * sx, cyp = (cy + 0.5) * sy;
 
-  ctx.beginPath();
+  const bodyR = Math.max(3.5, Math.min(sx, sy) * 0.7);
+  const arrowLen = Math.max(bodyR * 2.2, Math.min(fw, fh) * 0.78);
+  const headLen = Math.max(5, arrowLen * 0.42);
+  const headHalf = Math.max(3.2, arrowLen * 0.30);
+  const tipX = cxp + ux * arrowLen, tipY = cyp + uy * arrowLen;
+  const baseX = tipX - ux * headLen, baseY = tipY - uy * headLen;
+  const nx = -uy, ny = ux;                         // 箭头底边的垂直方向
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(8,10,16,.75)';           // 阴影描边：任何底色上都看得清
+  ctx.shadowBlur = 3;
+
+  ctx.beginPath();                                 // 箭杆
   ctx.moveTo(cxp, cyp);
-  ctx.lineTo(cxp + (hx / hl) * fw * 0.62, cyp + (hy / hl) * fh * 0.62);
+  ctx.lineTo(baseX, baseY);
   ctx.strokeStyle = '#ffd166';
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = Math.max(2.2, bodyR * 0.6);
+  ctx.lineCap = 'round';
   ctx.stroke();
 
-  ctx.beginPath();
-  ctx.arc(cxp, cyp, Math.max(3, Math.min(sx, sy) * 0.62), 0, Math.PI * 2);
+  ctx.beginPath();                                 // 实心三角箭头
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(baseX + nx * headHalf, baseY + ny * headHalf);
+  ctx.lineTo(baseX - nx * headHalf, baseY - ny * headHalf);
+  ctx.closePath();
+  ctx.fillStyle = '#ffd166';
+  ctx.fill();
+  ctx.restore();
+
+  ctx.beginPath();                                 // 机身圆（压在箭杆起点之上）
+  ctx.arc(cxp, cyp, bodyR, 0, Math.PI * 2);
   ctx.fillStyle = '#4f7cff';
   ctx.fill();
   ctx.strokeStyle = '#dfe8ff';
@@ -465,12 +511,16 @@ function renderDashboard() {
 
   const clusters = cov.dead_clusters || [];
   if (clusters.length) {
-    $('regions').innerHTML += clusters.map((c) => `
-      <div class="row tag-${c.reason === 'separated' ? 'sep' : 'tight'}">
-        <span class="rname">${c.reason === 'separated' ? '不可达区' : '死角'}</span>
+    $('regions').innerHTML += clusters.map((c) => {
+      const tag = c.reason === 'separated' ? 'sep' : c.reason === 'mixed' ? 'mixed' : 'tight';
+      const name = c.reason === 'separated' ? '不可达区' : c.reason === 'mixed' ? '混合死区' : '死角';
+      return `
+      <div class="row tag-${tag}">
+        <span class="rname">${name}</span>
         <span class="rval">${fmt(c.area_m2, 2)} m²</span>
         <span class="rsub">${c.reason_text}</span>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
 
   /* 阶段列表 */
@@ -481,7 +531,13 @@ function renderDashboard() {
       <span class="rsub">该阶段结束时覆盖 ${pct(p.coverage, 1)}</span>
     </div>`).join('') || '<p class="tip">—</p>';
   $('phases').querySelectorAll('[data-step]').forEach((el) => {
-    el.onclick = () => { pause(); state.step = Number(el.dataset.step); syncScrub(); render(); renderChart(); };
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    const jump = () => { pause(); state.step = Number(el.dataset.step); syncScrub(); render(); renderChart(); };
+    el.onclick = jump;
+    el.onkeydown = (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); jump(); }
+    };
   });
 
   /* 栅格化管线 */
@@ -509,7 +565,7 @@ function renderChart() {
   const cv = $('chart');
   const dpr = window.devicePixelRatio || 1;
   const wantW = Math.max(120, Math.round(cv.clientWidth * dpr));
-  const wantH = Math.round(130 * dpr);
+  const wantH = Math.max(90, Math.round((cv.clientHeight || 120) * dpr));
   if (cv.width !== wantW) cv.width = wantW;      // 仅在尺寸变化时重建，避免每帧重置画布
   if (cv.height !== wantH) cv.height = wantH;
 
@@ -569,14 +625,17 @@ function renderChart() {
 /* ============================================================== 播放控制 */
 function play(force) {
   if (state.playing && !force) return;
+  if (state.rafId) cancelAnimationFrame(state.rafId);   // 先取消旧循环，避免双链 2× 播放
+  state.rafId = 0;
   state.playing = true;
   $('playBtn').textContent = '❚❚';
   state.lastT = performance.now();
-  requestAnimationFrame(tick);
+  state.rafId = requestAnimationFrame(tick);
 }
 
 function pause() {
   state.playing = false;
+  if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
   $('playBtn').textContent = '▶';
 }
 
@@ -587,6 +646,7 @@ function syncScrub() {
 }
 
 function tick(now) {
+  state.rafId = 0;
   if (!state.playing) return;
   const dt = Math.min(0.1, (now - state.lastT) / 1000);
   state.lastT = now;
@@ -599,7 +659,7 @@ function tick(now) {
   syncScrub();
   render();
   renderChart();
-  if (state.playing) requestAnimationFrame(tick);
+  if (state.playing) state.rafId = requestAnimationFrame(tick);
 }
 
 /* ============================================================ 户型图上传 */
@@ -698,10 +758,22 @@ function bytesToB64(bytes) {
   return btoa(s);
 }
 
+let modalReturnFocus = null;
+
 function openImageModal(name) {
+  modalReturnFocus = document.activeElement;
   $('imgModal').hidden = false;
   $('imgName').textContent = `${name || upload.name} · ${upload.width}×${upload.height} px`;
+  const box = $('imgModal').querySelector('.modal-box');
+  box.tabIndex = -1;
+  box.focus();
   requestPreview();
+}
+
+function closeImageModal() {
+  $('imgModal').hidden = true;
+  if (modalReturnFocus && modalReturnFocus.focus) modalReturnFocus.focus();
+  modalReturnFocus = null;
 }
 
 async function requestPreview() {
@@ -718,7 +790,7 @@ async function requestPreview() {
     const d = json.diagnostics || {};
     const warn = (d.warnings || []).map((w) => `<div class="warn-line">⚠ ${w}</div>`).join('');
     $('imgStats').innerHTML = `
-      <div><b>${d.threshold}</b><span>阈值${d.threshold_auto ? '（Otsu 自动）' : ''}</span></div>
+      <div><b>${d.threshold}</b><span>阈值${d.threshold_auto ? (d.threshold_auto_adjusted ? '（自动优化）' : '（Otsu 自动）') : ''}</span></div>
       <div><b>${d.floor_area_m2} m²</b><span>识别面积</span></div>
       <div><b>${d.crop_px[0]}×${d.crop_px[1]}</b><span>户型像素</span></div>
       <div><b>${(d.meters_per_px * 100).toFixed(1)} cm</b><span>每像素实际尺寸</span></div>
@@ -743,7 +815,7 @@ async function saveImage() {
     });
     const json = await res.json();
     if (!res.ok || json.error) throw new Error(json.error || ('HTTP ' + res.status));
-    $('imgModal').hidden = true;
+    closeImageModal();
     await refreshFloorplans();
     selectFloorplan(json.id);
     setHint(`已加入：${upload.name}（${json.meta.size_x_m}×${json.meta.size_y_m} m）`, 'ok');
@@ -769,8 +841,30 @@ async function deleteUpload(id) {
     if (state.selected === id) {
       state.selected = null;
       state.data = null;
+      state.cells = null;
+      state.phases = [];
+      state.phaseOfStep = null;
+      state.step = 0;
+      state.reqSeq++;                       // 作废可能仍在途的仿真响应
+      pause();
+      $('scrub').max = 0; $('scrub').value = 0; $('scrub').disabled = true;
+      $('playBtn').disabled = true;
+      $('resetBtn').disabled = true;
+      $('stepNow').textContent = '0';
+      $('stepTotal').textContent = '0';
+      $('metrics').innerHTML = '';
+      $('regions').innerHTML = '';
+      $('phases').innerHTML = '';
+      $('stages').innerHTML = '';
+      $('covBig').textContent = '—';
+      $('covSub').textContent = '可达区域 —';
+      $('donutWalk').setAttribute('stroke-dasharray', '0 400');
+      $('donutReach').setAttribute('stroke-dasharray', '0 300');
       $('canvasEmpty').style.display = '';
+      const cv = $('view');
+      cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
       $('runBtn').disabled = true;
+      renderChart();
     }
     await refreshFloorplans();
     toast('已删除');
@@ -845,10 +939,24 @@ function bind() {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(requestPreview, 260);
   };
-  $('imgMask').onclick = () => { $('imgModal').hidden = true; };
-  $('imgCancel').onclick = () => { $('imgModal').hidden = true; };
+  $('imgMask').onclick = closeImageModal;
+  $('imgCancel').onclick = closeImageModal;
   $('imgReparse').onclick = requestPreview;
   $('imgSave').onclick = saveImage;
+
+  /* 焦点陷阱：Tab 只在弹层内部循环 */
+  $('imgModal').addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const list = Array.from(
+      $('imgModal').querySelectorAll('button, [href], input, select, [tabindex]:not([tabindex="-1"])')
+    ).filter((el) => !el.disabled && el.offsetParent !== null);
+    if (!list.length) return;
+    const first = list[0], last = list[list.length - 1];
+    const idx = list.indexOf(document.activeElement);
+    if (idx === -1) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return; }
+    if (e.shiftKey && idx === 0) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && idx === list.length - 1) { e.preventDefault(); first.focus(); }
+  });
 
   const syncThr = () => {
     const auto = $('thrAuto').checked;
@@ -863,7 +971,7 @@ function bind() {
   syncThr();
 
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') $('imgModal').hidden = true;
+    if (e.key === 'Escape' && !$('imgModal').hidden) closeImageModal();
   });
 
   window.addEventListener('resize', () => { if (state.data) { fitCanvas(); render(); renderChart(); } });

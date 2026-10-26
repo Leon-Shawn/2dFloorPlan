@@ -23,16 +23,23 @@ from __future__ import annotations
 import json
 import mimetypes
 import traceback
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .imageplan import ImageParseParams
-from .pipeline import RunParams, SimulationService
+from .pipeline import PlanningError, RunParams, SimulationService
+from .uploads import MAX_GRAY_PIXELS
 
 WEB_DIR = (Path(__file__).resolve().parent.parent / "web").resolve()
 MAX_BODY = 16 * 1024 * 1024
+MAX_PREVIEW_PIXELS = 1400 * 1400        # 预览本就要降采样：独立且更小的上限
 SPACING_MODES = ("exact", "overlap")
+
+
+class _PayloadTooLarge(ValueError):
+    """Request body exceeds MAX_BODY (mapped to HTTP 413)."""
 
 
 def _num(query: dict, name: str, default: float, lo: float, hi: float) -> float:
@@ -62,6 +69,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -71,14 +80,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, body, "application/json; charset=utf-8")
 
     def _body(self) -> dict:
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or raw_length.strip() == "":
             length = 0
-        if length <= 0:
+        else:
+            try:
+                length = int(raw_length)
+            except ValueError:
+                # 不排空请求体又不关连接的话，残留字节会被当成下一个请求解析
+                self.close_connection = True
+                raise ValueError("Content-Length 不是合法整数")
+            if length < 0:
+                self.close_connection = True
+                raise ValueError("Content-Length 不能为负")
+        if length == 0:
             return {}
         if length > MAX_BODY:
-            raise ValueError(f"请求体过大（上限 {MAX_BODY // (1024 * 1024)} MB）")
+            # 在读走请求体之前就拒绝：关闭连接，避免残留字节污染 keep-alive 管道
+            self.close_connection = True
+            raise _PayloadTooLarge(f"请求体过大（上限 {MAX_BODY // (1024 * 1024)} MB）")
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -121,9 +141,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found", "path": path}, 404)
         except KeyError as exc:
             return self._json({"error": f"未知户型：{exc}"}, 404)
+        except PlanningError as exc:
+            return self._json({
+                "error": "该户型在当前机器人尺寸下没有可行的清扫区域："
+                         "请尝试调整「机器人直径」或重新解析户型图",
+                "detail": str(exc),
+            }, 422)
         except Exception as exc:                             # noqa: BLE001
+            rid = uuid.uuid4().hex[:8]
+            print(f"[500] rid={rid} GET {path}")
             traceback.print_exc()
-            return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            return self._json({"error": "服务器内部错误", "request_id": rid}, 500)
 
     def do_DELETE(self):                                    # noqa: N802
         parsed = urlparse(self.path)
@@ -137,6 +165,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype and ctype != "application/json":
+                return self._json({"error": "仅接受 application/json 请求体"}, 415)
             body = self._body()
             if path == "/api/upload/houseexpo":
                 name = str(body.get("name") or "floorplan.json")
@@ -147,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/upload/image":
                 return self._json(self._add_image(body))
             if path == "/api/parse/preview":
-                gray, width, height = _gray_from_body(body)
+                gray, width, height = _gray_from_body(body, MAX_PREVIEW_PIXELS)
                 return self._json(self.service.parse_preview(
                     gray, width, height, _image_params(body)))
             if path == "/api/upload/reparse":
@@ -158,13 +189,17 @@ class Handler(BaseHTTPRequestHandler):
                 ok = self.service.delete_upload(uid)
                 return self._json({"deleted": ok, "id": uid}, 200 if ok else 404)
             return self._json({"error": "not found", "path": path}, 404)
+        except _PayloadTooLarge as exc:
+            return self._json({"error": str(exc)}, 413)
         except ValueError as exc:
             return self._json({"error": str(exc)}, 400)
         except KeyError as exc:
             return self._json({"error": f"未知对象：{exc}"}, 404)
         except Exception as exc:                             # noqa: BLE001
+            rid = uuid.uuid4().hex[:8]
+            print(f"[500] rid={rid} POST {path}")
             traceback.print_exc()
-            return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            return self._json({"error": "服务器内部错误", "request_id": rid}, 500)
 
     # --------------------------------------------------------------------- helpers
     def _add_image(self, body: dict) -> dict:
@@ -200,7 +235,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, target.read_bytes(), ctype)
 
 
-def _gray_from_body(body: dict):
+def _gray_from_body(body: dict, max_pixels: int = MAX_GRAY_PIXELS):
     """Decode the browser-posted grayscale buffer."""
     import base64
     try:
@@ -210,6 +245,10 @@ def _gray_from_body(body: dict):
         raise ValueError("缺少图像尺寸 width/height") from exc
     if width <= 0 or height <= 0:
         raise ValueError("图像尺寸必须为正")
+    if width * height > max_pixels:
+        # 在 base64 解码与任何全图遍历之前先拒绝：超大图像的纯 Python 解析
+        # 会长时间占满一个线程（CPU 耗尽型 DoS）。
+        raise ValueError(f"图像过大（上限 {max_pixels} 像素）")
     raw = body.get("gray_b64") or ""
     if not raw:
         raise ValueError("缺少灰度数据 gray_b64")
@@ -248,11 +287,34 @@ def _image_params(body: dict) -> ImageParseParams:
     )
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    """Is something already accepting connections on this port?
+
+    注意：Windows 下 SO_REUSEADDR 允许同一端口被重复绑定，仅靠 bind 无法发现
+    "已有实例在运行"，必须主动连接探测一次，否则会出现两个服务静默共存的局面。
+    """
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=0.35):
+            return True
+    except OSError:
+        return False
+
+
 def serve(host: str = "127.0.0.1", port: int = 8017, data_dir: str | None = None,
-          upload_dir=None, service: SimulationService | None = None) -> None:
+          upload_dir=None, service: SimulationService | None = None) -> int:
     service = service or SimulationService(data_dir, upload_dir=upload_dir)
     Handler.service = service
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    if _port_in_use(host, port):
+        print(f"端口 {port} 已被占用（可能已有一个 cleaner-sim 实例在运行）——"
+              f"请先关闭它，或使用 --port 指定其它端口。")
+        return 1
+    try:
+        httpd = ThreadingHTTPServer((host, port), Handler)
+    except OSError as exc:
+        print(f"无法在 {host}:{port} 启动服务：{exc}"
+              f"（端口可能被占用，请用 --port 换一个）")
+        return 1
     print(f"cleaner-sim  |  {len(service.floorplans())} floorplans from {service.data_dir()}")
     print(f"uploads      |  {service.upload_dir()}")
     print(f"open         |  http://{host}:{port}/")
@@ -262,3 +324,4 @@ def serve(host: str = "127.0.0.1", port: int = 8017, data_dir: str | None = None
         print("\nbye")
     finally:
         httpd.server_close()
+    return 0

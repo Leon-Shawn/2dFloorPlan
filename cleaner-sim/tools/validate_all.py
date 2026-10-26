@@ -28,14 +28,15 @@ for meta in metas:
         p = svc.run(fid, RunParams())
         dt = time.perf_counter() - t0
     except Exception as exc:                                  # noqa: BLE001
-        failures.append((fid, f"{type(exc).__name__}: {exc}"))
+        failures.append((fid, meta, f"{type(exc).__name__}: {exc}"))
         print(f"{meta['room_num']:>5} {meta['size_x_m']:>5}x{meta['size_y_m']:<5} "
               f"FAILED  {type(exc).__name__}: {exc}")
         continue
 
     total_time += dt
     cov_sum += p["coverage"]["coverage_walkable"]
-    seek = p["pipeline"]["stages"][2]["ms"] / 1000.0
+    seek = next((s["ms"] for s in p["pipeline"]["stages"]
+                 if s["name"].startswith("BCD")), 0.0) / 1000.0
     print(f"{meta['room_num']:>5} {meta['size_x_m']:>5}x{meta['size_y_m']:<5} "
           f"{p['grid']['w']:>4}x{p['grid']['h']:<4} {p['metrics']['steps']:>7} "
           f"{p['coverage']['coverage_reachable']:>9.4f} "
@@ -51,9 +52,17 @@ print(f"OK {ok}/{len(metas)}   mean coverage(walkable)={cov_sum/max(1,ok):.4f}  
       f"total {total_time:.1f}s   mean {total_time/max(1,ok):.2f}s")
 worst.sort(reverse=True)
 print("slowest:", [(f"{d:.2f}s", r) for d, _, r in worst[:5]])
-if failures:
-    print("\nFAILURES:")
-    for fid, err in failures:
+
+# 用户上传的户型可能本身不可规划（解析质量差等）——单独汇总，不影响内置样例的结论
+builtin_failures = [(fid, err) for fid, meta, err in failures if not meta.get("custom")]
+custom_failures = [(fid, err) for fid, meta, err in failures if meta.get("custom")]
+if custom_failures:
+    print(f"\nSKIPPED uploads that cannot be planned ({len(custom_failures)}):")
+    for fid, err in custom_failures:
+        print(f"  {fid}: {err}")
+if builtin_failures:
+    print("\nFAILURES (built-in samples):")
+    for fid, err in builtin_failures:
         print(f"  {fid}: {err}")
     sys.exit(1)
-print("\nall floorplans planned successfully")
+print("\nall built-in floorplans planned successfully")

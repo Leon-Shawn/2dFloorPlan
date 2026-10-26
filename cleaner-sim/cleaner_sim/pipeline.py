@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import copy
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -39,6 +41,17 @@ class RunParams:
     wall_threshold: float = 0.5
     spacing_mode: str = "exact"
 
+    def __post_init__(self):
+        # Guard the direct-API path: the HTTP layer clamps these, but callers of
+        # the Python API used to be able to reach a ZeroDivisionError deep in
+        # rasterize.py with cell_cm == 0.
+        if not (self.cell_cm > 0):
+            raise ValueError("cell_cm 必须为正数")
+        if not (self.robot_cm > 0):
+            raise ValueError("robot_cm 必须为正数")
+        if self.supersample < 1:
+            raise ValueError("supersample 必须 ≥ 1")
+
     def key(self):
         return (self.cell_cm, self.robot_cm, self.target_cov, self.max_retreat,
                 self.speed_mps, self.turn_time_s, self.supersample,
@@ -46,6 +59,15 @@ class RunParams:
 
     def as_dict(self):
         return asdict(self)
+
+
+class PlanningError(RuntimeError):
+    """The planner cannot produce a route for this floorplan / parameter set.
+
+    Raised (instead of a bare 500) when the requested robot size leaves no
+    reachable cleaning positions, so the HTTP layer can answer with a clear,
+    actionable error message.
+    """
 
 
 def _mask_b64(mask) -> str:
@@ -56,13 +78,30 @@ MAX_PHASES = 30
 
 
 def _compact_phases(phases: list[dict]) -> list[dict]:
-    """Keep the payload small when a busy floor produces dozens of retreat phases."""
+    """Keep the payload small when a busy floor produces dozens of retreat phases.
+
+    Priority is the phase's *interval length* (how much of the replay it spans);
+    `cluster_cells` only exists on retreat phases, so using it as the sort key
+    made every region phase tie at 0 and get dropped first. The kept phases are
+    then extended so they still tile the whole replay contiguously (no holes).
+    """
     if len(phases) <= MAX_PHASES:
         return phases
     head, tail = phases[0], phases[-1]
-    middle = sorted(phases[1:-1], key=lambda p: p.get("cluster_cells", 0), reverse=True)
+    middle = phases[1:-1]
+
+    def span(p: dict) -> int:
+        return max(0, p.get("end_step", 0) - p.get("start_step", 0))
+
+    middle = sorted(middle, key=span, reverse=True)
     kept = [head] + middle[:MAX_PHASES - 2] + [tail]
-    return sorted(kept, key=lambda p: p["start_step"])
+    kept.sort(key=lambda p: p["start_step"])
+
+    # Close any gaps left by dropped phases so every step stays covered.
+    for prev, nxt in zip(kept, kept[1:]):
+        if prev["end_step"] + 1 < nxt["start_step"]:
+            prev["end_step"] = nxt["start_step"] - 1
+    return kept
 
 
 class SimulationService:
@@ -74,6 +113,7 @@ class SimulationService:
         self._runs: dict[tuple, dict] = {}
         self._thumbs: dict[tuple[str, int], bytes] = {}
         self.cache_size = cache_size
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ metadata
     def data_dir(self) -> str:
@@ -87,37 +127,45 @@ class SimulationService:
         return self.library.list_meta() + self.uploads.list_meta()
 
     def is_upload(self, fid: str) -> bool:
-        return fid in self.uploads.items
+        return self.uploads.contains(fid)
 
     def source_for(self, fid: str):
         """Resolve an id to a Floorplan (built-in / JSON upload) or FineMask (image)."""
-        if fid in self.uploads.items:
+        if self.uploads.contains(fid):
             return self.uploads.source(fid)
         return self.library.get(fid)
 
     def thumbnail(self, floorplan_id: str, width: int = 168) -> bytes:
         key = (floorplan_id, width)
-        if key not in self._thumbs:
-            if floorplan_id in self.uploads.items:
-                self._thumbs[key] = self.uploads.thumbnail(floorplan_id, width)
-            else:
-                self._thumbs[key] = thumbnail_png(self.library.get(floorplan_id), width)
-        return self._thumbs[key]
+        with self._lock:
+            cached = self._thumbs.get(key)
+        if cached is not None:
+            return cached
+        if self.uploads.contains(floorplan_id):
+            data = self.uploads.thumbnail(floorplan_id, width)
+        else:
+            data = thumbnail_png(self.library.get(floorplan_id), width)
+        with self._lock:
+            self._thumbs[key] = data
+        return data
 
     def invalidate(self, floorplan_id: str) -> None:
-        for key in [k for k in self._runs if k[0] == floorplan_id]:
-            del self._runs[key]
-        for key in [k for k in self._thumbs if k[0] == floorplan_id]:
-            del self._thumbs[key]
+        with self._lock:
+            for key in [k for k in self._runs if k[0] == floorplan_id]:
+                del self._runs[key]
+            for key in [k for k in self._thumbs if k[0] == floorplan_id]:
+                del self._thumbs[key]
 
     # -------------------------------------------------------------------- uploads
     def add_houseexpo(self, name: str, text: str) -> dict:
         up = self.uploads.add_houseexpo(name, text)
+        self.invalidate(up.id)
         return {"id": up.id, "meta": up.meta, "kind": up.kind}
 
     def add_image(self, name: str, gray: bytes, width: int, height: int,
                   params: ImageParseParams) -> dict:
         up = self.uploads.add_image(name, gray, width, height, params)
+        self.invalidate(up.id)
         return {"id": up.id, "meta": up.meta, "kind": up.kind,
                 "diagnostics": up.diagnostics,
                 "preview": G.b64(self.uploads.thumbnail(up.id, 320))}
@@ -149,9 +197,10 @@ class SimulationService:
     # ----------------------------------------------------------------- simulation
     def run(self, floorplan_id: str, params: RunParams) -> dict:
         key = (floorplan_id, params.key())
-        cached = self._runs.get(key)
+        with self._lock:
+            cached = self._runs.get(key)
         if cached is not None:
-            return cached
+            return copy.deepcopy(cached)
 
         t0 = time.perf_counter()
         source = self.source_for(floorplan_id)
@@ -172,7 +221,7 @@ class SimulationService:
         t_plan = time.perf_counter()
 
         if not plan_result.path:
-            raise RuntimeError(plan_result.stats.get("error", "planning produced no route"))
+            raise PlanningError(plan_result.stats.get("error", "planning produced no route"))
 
         simulation = simulate_motion(
             plan_result, occ, G.count(view.cleanable),
@@ -235,10 +284,14 @@ class SimulationService:
             },
         }
 
-        if len(self._runs) >= self.cache_size:
-            self._runs.pop(next(iter(self._runs)))
-        self._runs[key] = payload
+        # Store a private deep copy so later mutation of the returned payload can
+        # never corrupt the cache (and vice versa).
+        with self._lock:
+            if len(self._runs) >= self.cache_size:
+                self._runs.pop(next(iter(self._runs)))
+            self._runs[key] = copy.deepcopy(payload)
         return payload
 
 
-__all__ = ["RunParams", "SimulationService", "SPACING_MODES", "ImageParseParams"]
+__all__ = ["RunParams", "SimulationService", "SPACING_MODES", "ImageParseParams",
+           "PlanningError"]

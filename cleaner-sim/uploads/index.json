@@ -1,3 +1,124 @@
 {
- "uploads": []
+ "uploads": [
+  {
+   "id": "up-40c744dc26f875f545915ab2bdb8fb53.png-143722",
+   "name": "40c744dc26f875f545915ab2bdb8fb53.png",
+   "kind": "image",
+   "created": 1791787042.9110339,
+   "meta": {
+    "id": "up-40c744dc26f875f545915ab2bdb8fb53.png-143722",
+    "room_num": 0,
+    "size_x_m": 11.0,
+    "size_y_m": 11.07,
+    "area_m2": 121.78,
+    "n_verts": 0,
+    "categories": [],
+    "tier": "custom",
+    "kind": "image",
+    "name": "40c744dc26f875f545915ab2bdb8fb53.png"
+   },
+   "parse_params": {
+    "threshold": null,
+    "invert": false,
+    "seal_px": 4,
+    "min_island_px": 40,
+    "real_width_m": 11.0,
+    "real_height_m": null,
+    "scale_axis": "x"
+   },
+   "diagnostics": {
+    "threshold": 169,
+    "threshold_auto": true,
+    "invert": false,
+    "seal_px": 4,
+    "image_px": [
+     560,
+     482
+    ],
+    "crop_px": [
+     310,
+     312
+    ],
+    "crop_box": [
+     116,
+     92,
+     425,
+     403
+    ],
+    "wall_fraction": 0.07,
+    "free_px": 68110,
+    "dropped_islands": 0,
+    "meters_per_px": 0.03548,
+    "floor_area_m2": 121.78,
+    "free_fraction": 0.2523,
+    "warnings": []
+   },
+   "gray_size": [
+    560,
+    482
+   ]
+  },
+  {
+   "id": "up-1d31dc5c6f17d6bcaa1d60b402963379.jpeg-143934",
+   "name": "1d31dc5c6f17d6bcaa1d60b402963379.jpeg",
+   "kind": "image",
+   "created": 1791787174.6994667,
+   "meta": {
+    "id": "up-1d31dc5c6f17d6bcaa1d60b402963379.jpeg-143934",
+    "room_num": 0,
+    "size_x_m": 10.0,
+    "size_y_m": 12.45,
+    "area_m2": 124.47,
+    "n_verts": 0,
+    "categories": [],
+    "tier": "custom",
+    "kind": "image",
+    "name": "1d31dc5c6f17d6bcaa1d60b402963379.jpeg"
+   },
+   "parse_params": {
+    "threshold": null,
+    "invert": false,
+    "seal_px": 0,
+    "min_island_px": 40,
+    "real_width_m": 10.0,
+    "real_height_m": null,
+    "scale_axis": "x"
+   },
+   "diagnostics": {
+    "threshold": 234,
+    "threshold_auto": true,
+    "threshold_auto_adjusted": true,
+    "invert": false,
+    "seal_px": 0,
+    "image_px": [
+     453,
+     560
+    ],
+    "crop_px": [
+     421,
+     524
+    ],
+    "crop_box": [
+     15,
+     13,
+     435,
+     536
+    ],
+    "wall_fraction": 0.1516,
+    "free_px": 165011,
+    "dropped_islands": 90,
+    "meters_per_px": 0.02375,
+    "floor_area_m2": 124.47,
+    "free_fraction": 0.6533,
+    "warnings": [
+     "自动阈值已从 184 优化为 234（原阈值下墙线轮廓未闭合，外部区域会泄漏进室内）"
+    ],
+    "threshold_auto_base": 184
+   },
+   "gray_size": [
+    453,
+    560
+   ]
+  }
+ ]
 }

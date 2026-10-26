@@ -1,0 +1,11 @@
+# 运行产物（每次启动/上传都会重新生成）
+server.log
+server.err
+
+# Python
+__pycache__/
+*.pyc
+
+# 测试与上传的本地状态
+tests/_tmp/
+uploads/

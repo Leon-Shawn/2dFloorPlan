@@ -3,6 +3,15 @@
 > 面向《软件工程理论基础》课程设计 **选题 15 · 2D 户型全覆盖清扫仿真**
 > 本项目需实现的功能模块：**① 户型图转栅格地图（核心）· ④ 机器人运动仿真 · ⑤ 覆盖率计算与可视化（核心）· ⑦ 路径效率指标 · ⑨ 仿真过程回放**
 
+> **⚠️ 2026-10 修订说明（当前工作区实际状态）**
+> 本工作区现已收敛为：`HouseExpo/LICENSE`、`HouseExpo/README.md`、`HouseExpo/samples/`
+> （45 张样例 JSON + 索引 CSV），以及 `cleaner-sim/` 项目本体。
+> 本文档第二、五、六、七、十节中提到的 `json.tar.gz`、`pseudoslam/`、`experiments/`、
+> `map_id_sets/`、`tools/`、`previews/` 等目录**均不在当前工作区**（当时为临时落盘，后续已清理）。
+> 相关命令与行号映射按**历史记录**保留，仅供参考；如需完整数据集或上游源码，请按第十节命令
+> 自行从 GitHub 拉取。清扫仿真主体（`cleaner-sim/`）不依赖这些文件，
+> 仅用 `HouseExpo/samples/json/` 即可完整运行与验证。
+
 ---
 
 ## 一、来源、许可与版本
@@ -13,7 +22,7 @@
 | 分支 / commit | `master` @ `45e2b2505f6ea1fe49c0203f14efb7ce20b94e7c`（2023-09-26） |
 | 许可 | **MIT License**，Copyright (c) 2019 Tingguang Li |
 | 论文 | HouseExpo: A Large-scale 2D Indoor Layout Dataset for Learning-based Algorithms on Mobile Robots（IROS 2020，arXiv:1903.09845） |
-| 本地形态 | 上游 `master` 完整克隆 + 本项目补充的 `samples/`、`map_id_sets/`、`tools/`、`previews/` |
+| 本地形态 | **现仅保留** `LICENSE`、`README.md`、`samples/`（45 张样例）；完整克隆与补充目录（`pseudoslam/`、`map_id_sets/`、`tools/`、`previews/` 等）已移除，见文首修订说明 |
 
 **署名要求**：使用该数据集须保留 `LICENSE`（MIT，允许修改与再分发，需保留版权声明），论文/报告中按上游 README 给出的 BibTeX 引用。切勿删除 `LICENSE` 文件。
 
@@ -21,7 +30,7 @@
 
 ---
 
-## 二、下载清单（本次实际落盘的内容）
+## 二、下载清单（历史记录：当时落盘的内容；现多数已不在工作区）
 
 | 路径 | 大小 | 内容 | 对应模块 |
 |---|---|---|---|
@@ -33,7 +42,8 @@
 | `tools/` | ~16 KB | **本地补充**：3 个即用脚本（见第七节） | ①⑦ |
 | `previews/` | 6 张 PNG | **本地补充**：已渲染的栅格地图预览，可直接核对解析效果 | ① |
 
-> 说明：`samples/`、`map_id_sets/`、`tools/`、`previews/` 是本次为项目补的，不属于上游仓库，`git status` 中显示为未跟踪文件，不影响上游代码。
+> 说明：`samples/` 等补充目录不属于上游仓库，当时以未跟踪文件的形态存在于临时克隆中；
+> 当前工作区已无 `.git`，且除 `samples/` 外均已移除。**当前实际可用的只有 `samples/`（45 张）**。
 
 ---
 
@@ -118,7 +128,7 @@ pip install numpy opencv-python matplotlib pyyaml
 另需注意：
 
 - `pseudoslam/viz/*.py` 的默认路径（`./HouseExpo/json/`）是**相对当前工作目录**解析的，必须从仓库根目录运行。
-- 本环境下 PATH 上的 `tar`（PortableGit 的 MSYS tar）**不可用**（`NtCreateDirectoryObject ... 0xC0000022`），上游 README 的 `tar -xvzf json.tar.gz` 会失败——请改用 `tools/extract_dataset.ps1`（内部调用 `C:\Windows\System32\tar.exe`）。
+- 本环境下 PATH 上的 `tar`（PortableGit 的 MSYS tar）曾出现不可用（`NtCreateDirectoryObject ... 0xC0000022`），上游 README 的 `tar -xvzf json.tar.gz` 可能失败；当时改用 `tools/extract_dataset.ps1`（内部调用 `C:\Windows\System32\tar.exe`）绕过——**该脚本当前不在工作区**，如需复现请自行调用系统自带 `C:\Windows\System32\tar.exe` 解压。
 - 仿真循环用 `matplotlib.pause(0.001)` 渲染，只是 demo 级别；选题要求实时覆盖率可视化和回放，建议按选题说明换成浏览器 Canvas 前端。
 
 ---
@@ -182,7 +192,9 @@ python tools/floorplan_preview.py --sample-dir samples/json --limit 3 --outdir p
 
 `previews/rooms_overlay_demo.png` 是叠加 `room_category` 的版本（房间灰、墙体黑）。注意图中**仍有一块白色区域没有任何房间包围盒覆盖**：HouseExpo 的 `room_category` 只是**粗粒度、可重叠的包围盒，不构成对户型的完整划分**。因此它只适合做「某点属于哪类房间」的查询（上游 `jsonReader.get_room_tp()` 即如此实现，一个像素可同时命中多个类别），**不要**拿它当房间分割结果；若要按房间统计覆盖率，需要自行做区域划分。
 
-### 2) 解压数据集
+### 2) 解压数据集（历史命令；`json.tar.gz` 与脚本均不在当前工作区）
+
+> ⚠️ 以下命令仅作历史参考：需要自行拉取上游 `json.tar.gz` 并自备解压脚本。
 
 ```powershell
 # 只解压 500 张试跑

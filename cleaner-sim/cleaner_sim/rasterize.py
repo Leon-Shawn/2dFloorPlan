@@ -137,20 +137,32 @@ def downsample_wall(inside_fine: bytearray, fw: int, fh: int, factor: int,
     door openings (typically far wider than one coarse cell) open.
     """
     factor = max(1, int(factor))
-    cw, ch = fw // factor, fh // factor
+    # 向上取整：截断会丢掉右侧/下侧不足一格的余数条带（缩略图会缺边）
+    cw, ch = (fw + factor - 1) // factor, (fh + factor - 1) // factor
     wall = bytearray(cw * ch)
     sub = factor * factor
     for cy in range(ch):
         fy0 = cy * factor
+        dy_max = min(factor, fh - fy0)
         for cx in range(cw):
             fx0 = cx * factor
+            dx_max = min(factor, fw - fx0)
             wall_sub = 0
-            for dy in range(factor):
-                row = (fy0 + dy) * fw + fx0
-                for dx in range(factor):
-                    if not inside_fine[row + dx]:
-                        wall_sub += 1
-            if wall_sub >= wall_threshold * sub:
+            if dx_max == factor and dy_max == factor:          # 完整块：快速路径
+                total_sub = sub
+                for dy in range(factor):
+                    row = (fy0 + dy) * fw + fx0
+                    for dx in range(factor):
+                        if not inside_fine[row + dx]:
+                            wall_sub += 1
+            else:                                              # 右侧/下侧余数块
+                total_sub = dx_max * dy_max
+                for dy in range(dy_max):
+                    row = (fy0 + dy) * fw + fx0
+                    for dx in range(dx_max):
+                        if not inside_fine[row + dx]:
+                            wall_sub += 1
+            if total_sub and wall_sub >= wall_threshold * total_sub:
                 wall[cy * cw + cx] = 1
     return wall, cw, ch
 
@@ -282,6 +294,8 @@ def build_robot_view(occ: Occupancy, robot_cm: float = 34.0) -> RobotView:
     and the area it cleans at every position. Square footprints tile the sweep
     bands exactly, which is what lets a plain boustrophedon reach the walls.
     """
+    if len(occ.walkable) != occ.width * occ.height or len(occ.wall) != occ.width * occ.height:
+        raise ValueError(f"occupancy mask size mismatch: {occ.width}x{occ.height}")
     radius_cells = max(1, int(round((robot_cm / 2.0) / occ.cell_cm)))
     center_ok = G.erode_square(occ.walkable, occ.width, occ.height, radius_cells)
 
